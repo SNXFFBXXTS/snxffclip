@@ -308,13 +308,26 @@ def score_candidates(cands, segs, loud):
     return sorted(cands, key=lambda c: c["score"], reverse=True)
 
 
-def pick(cands, k, gap=5.0):
+def pick(cands, k, gap=5.0, fill=True):
     chosen = []
     for c in cands:
         if all(c["end"] + gap <= d["start"] or c["start"] >= d["end"] + gap for d in chosen):
             chosen.append(c)
         if len(chosen) == k:
             break
+    if fill and len(chosen) < k:
+        # short video: add variations that overlap but open on a different line
+        for c in cands:
+            if len(chosen) == k:
+                break
+            if c in chosen:
+                continue
+            if all(abs(c["start"] - d["start"]) >= 4.0 and c["i"] != d["i"] for d in chosen):
+                c["variation"] = True
+                chosen.append(c)
+        n = sum(1 for c in chosen if c.get("variation"))
+        if n:
+            print(f"  (video is short - {n} clip(s) overlap but start on a different line)")
     return chosen
 
 
@@ -433,18 +446,60 @@ def accent_color(video: Path):
     return "#%02X%02X%02X" % (int(rr * 255), int(gg * 255), int(bb * 255))
 
 
-def resolve_style(args, video=None):
-    st = dict(CAPTION_PRESETS.get(getattr(args, "style", None) or "highlight",
-                                  CAPTION_PRESETS["highlight"]))
+def analyse_footage(video: Path):
+    """Brightness, colourfulness and busyness of the clip (0..1 each)."""
+    import numpy as np
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(video), "-vf",
+                        "fps=2,scale=96:54", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                       capture_output=True)
+    a = np.frombuffer(r.stdout, dtype=np.uint8)
+    if a.size < 96 * 54 * 3:
+        return None
+    f = a[: a.size // (96 * 54 * 3) * 96 * 54 * 3].reshape(-1, 54, 96, 3).astype(float) / 255
+    lum = (0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2])
+    mx, mn = f.max(axis=-1), f.min(axis=-1)
+    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0)
+    busy = (np.abs(np.diff(lum, axis=1)).mean() + np.abs(np.diff(lum, axis=2)).mean())
+    return {"lum": float(lum.mean()), "sat": float(sat.mean()), "busy": float(min(1.0, busy * 6))}
+
+
+def auto_style(video, words=None, duration=None):
+    """-> (preset, match_colours, words_per_line, reason)"""
+    info = analyse_footage(video) if video is not None else None
+    wps = (len(words) / duration) if words and duration else 2.5
+    per = 2 if wps > 3.2 else 3
+    if not info:
+        return "highlight", False, per, "default"
+    if info["busy"] > 0.55 or info["lum"] > 0.62:
+        return "box", True, per + 1, "busy/bright footage - box keeps it readable"
+    if info["lum"] < 0.3 and info["sat"] > 0.22:
+        return "neon", True, per, "dark, colourful footage - neon glow in its colour"
+    if info["sat"] > 0.18:
+        return "highlight", True, per, "colourful footage - highlight in its colour"
+    return "highlight", False, per, "plain footage - classic yellow highlight"
+
+
+def resolve_style(args, video=None, words=None, duration=None):
+    preset = getattr(args, "style", None) or "auto"
+    match = getattr(args, "match_colors", False)
+    auto_words = None
+    if preset == "auto":
+        preset, match, auto_words, why = auto_style(video, words, duration)
+        print(f"  auto style: {CAPTION_PRESETS[preset]['label']} ({why})")
+    st = dict(CAPTION_PRESETS.get(preset, CAPTION_PRESETS["highlight"]))
+    st["preset"] = preset
+    if auto_words:
+        st["words"] = auto_words
     camp = getattr(args, "campaign_data", None)
     if camp and isinstance(camp.get("caption_style"), dict):
         st.update(camp["caption_style"])
-    for k, v in (getattr(args, "cap", None) or {}).items():
-        if v is not None and k in st:
-            st[k] = v
-    if getattr(args, "words", None):
-        st["words"] = args.words
-    if getattr(args, "match_colors", False) and video is not None:
+    if getattr(args, "style", None) != "auto":       # manual tweaks only apply to a chosen look
+        for k, v in (getattr(args, "cap", None) or {}).items():
+            if v is not None and k in st:
+                st[k] = v
+        if getattr(args, "words", None):
+            st["words"] = args.words
+    if match and video is not None:
         acc = accent_color(video)
         if acc:
             print(f"  caption colour matched to video: {acc}")
@@ -610,23 +665,47 @@ def make_clip(src, start, end, out: Path, args, words=None):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         raw = fetch_segment(src, start, end, tmp)
-        cap_words, offset = [], 0.0
-        if args.captions:
-            if words is None:
-                segs = transcribe(raw, args.model, cache=False)
-                cap_words = [w for s in segs for w in s["words"]]
-            else:
-                cap_words = [w for w in words if w[0] >= start - 0.05 and w[1] <= end + 0.05]
-                offset = start
-        style = resolve_style(args, raw if getattr(args, "match_colors", False) else None)
-        subs = build_ass(cap_words, offset, tmp, style,
+        win = []                                  # words in source time
+        if words is not None:
+            win = [tuple(w) for w in words if w[0] >= start - 0.05 and w[1] <= end + 0.05]
+        elif args.captions:
+            segs = transcribe(raw, args.model, cache=False)
+            win = [(w[0] + start, w[1] + start, w[2]) for s in segs for w in s["words"]]
+        need_video = getattr(args, "style", None) == "auto" or getattr(args, "match_colors", False)
+        style = resolve_style(args, raw if need_video else None, win, end - start)
+        subs = build_ass(win if args.captions else [], start, tmp, style,
                          overlay=getattr(args, "on_screen", None), duration=end - start)
         music = pick_music(getattr(args, "music", None))
         if music:
             print(f"  music: {music.name}")
         render(raw, out, args.mode, subs, music,
                getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0))
+    side = {"source": str(src), "start": start, "end": end, "words": win, "style": style,
+            "mode": args.mode, "captions": bool(args.captions),
+            "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
+            "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None)}
+    out.with_suffix(".clip.json").write_text(json.dumps(side))
     print(f"  saved {out}")
+
+
+def restyle_mode(args):
+    """Re-render one clip with a new caption style (uses the saved .clip.json)."""
+    clip = Path(args.restyle).expanduser()
+    side_f = clip.with_suffix(".clip.json")
+    if not side_f.is_file():
+        die(f"no saved settings for {clip.name} - it was made before Restyle existed, make it again")
+    sd = json.loads(side_f.read_text())
+    args.mode = sd.get("mode", args.mode)
+    args.captions = True
+    args.music = sd.get("music")
+    args.music_vol = sd.get("music_vol", 0.15)
+    args.music_start = sd.get("music_start", 0.0)
+    args.on_screen = sd.get("on_screen")
+    src = sd["source"]
+    if not is_url(src) and not Path(src).is_file():
+        die(f"the original video isn't there any more: {src}")
+    print(f"> restyling {clip.name}")
+    make_clip(src, sd["start"], sd["end"], clip, args, [tuple(w) for w in sd.get("words", [])])
 
 
 # ======================================================================
@@ -956,6 +1035,10 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.rsbar{background:#2a1a22;border:1px solid var(--acc);border-radius:12px;padding:12px;margin-top:10px;font-size:14px}
+.autonote{font-size:12.5px;color:var(--dim);background:#0b0c10;border-radius:10px;padding:10px;margin-top:10px}
+.capctl.dis .field:not(.keep),.capctl.dis .row,.capctl.dis #cs_reset{opacity:.35;pointer-events:none}
+.clip .a button.rs{border-color:var(--acc2);color:var(--acc2)}
 .capdet summary{color:var(--dim);font-size:14px}
 .capwrap{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap}
 .capctl{flex:1;min-width:220px}
@@ -999,9 +1082,15 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
   </div>
   <label class="toggle"><input type="checkbox" id="caps" checked> Burn in captions</label>
   <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">Word highlight</b></summary>
+   <div id="rsbar" class="rsbar" style="display:none">
+     <div>🎨 Restyling <b id="rsname"></b></div>
+     <div class="row" style="margin-top:8px"><button type="button" class="go" id="rsapply" style="margin:0;padding:10px">Apply to this clip</button>
+       <button type="button" class="small" id="rscancel">Cancel</button></div></div>
+   <div id="autonote" class="autonote">✨ Clipper picks the best look for each clip from its colours, brightness and
+     how fast people talk. Change any clip afterwards with its <b>🎨 Restyle</b> button.</div>
    <div class="capwrap">
     <div class="capctl">
-      <div class="field"><label>Look</label><select id="cs_preset"></select></div>
+      <div class="field keep"><label>Look</label><select id="cs_preset"></select></div>
       <label class="toggle" style="margin-top:10px"><input type="checkbox" id="cs_match">
         Match colours to the video</label>
       <div class="field" style="margin-top:10px"><label>Font</label><select id="cs_font"></select></div>
@@ -1079,20 +1168,27 @@ const CS_KEY='clipper_capstyle';
 function csLoadSaved(){try{return JSON.parse(localStorage.getItem(CS_KEY)||'null')}catch(e){return null}}
 function csSave(){try{localStorage.setItem(CS_KEY,JSON.stringify(cs))}catch(e){}}
 function csFromPreset(name){
+  if(name==='auto'){cs.preset='auto';return}
   const p=PRESETS[name]; cs={preset:name,match:cs.match||false,font:p.font,size:p.size,text:p.text,
     hl:p.highlight||'#FFE14D',hlon:!!p.highlight,out:p.outline,pos:p.pos,words:p.words,upper:p.upper,pop:p.pop};
 }
 function csToUI(){
-  $('#cs_preset').value=cs.preset; $('#cs_match').checked=cs.match;
+  const auto=cs.preset==='auto';
+  $('#cs_preset').value=cs.preset; $('#cs_match').checked=auto?true:cs.match;
+  $('#cs_match').disabled=auto; $('.capctl').classList.toggle('dis',auto);
+  $('#autonote').style.display=auto&&!restyleTarget?'':'none';
+  if(auto){ $('#capsum').textContent='✨ Auto (best for each clip)'; $('#pv').innerHTML='<span style="font-size:11px;color:#aaa;font-weight:600">picked per clip</span>';
+    $('#pv').style.textShadow='none'; $('#pv').style.top='45%'; $('#pv').style.bottom=''; $('#pvmatch').style.display='none'; return }
   if(![...$('#cs_font').options].some(o=>o.value===cs.font)) $('#cs_font').add(new Option(cs.font,cs.font));
   $('#cs_font').value=cs.font; $('#cs_text').value=cs.text; $('#cs_hl').value=cs.hl; $('#cs_hlon').checked=cs.hlon;
   $('#cs_out').value=cs.out; $('#cs_size').value=cs.size; $('#cs_words').value=cs.words;
   $('#cs_upper').checked=cs.upper; $('#cs_pop').checked=cs.pop;
   document.querySelectorAll('#cs_pos button').forEach(b=>b.classList.toggle('on',b.dataset.v===cs.pos));
-  $('#cs_outlbl').textContent=PRESETS[cs.preset].box?'Box':(PRESETS[cs.preset].glow?'Glow':'Outline');
+  $('#cs_outlbl').textContent=(PRESETS[cs.preset]||{}).box?'Box':((PRESETS[cs.preset]||{}).glow?'Glow':'Outline');
   csPreview();
 }
 function csFromUI(){
+  if($('#cs_preset').value==='auto'){cs.preset='auto';csToUI();return}
   cs.preset=$('#cs_preset').value; cs.match=$('#cs_match').checked; cs.font=$('#cs_font').value;
   cs.text=$('#cs_text').value; cs.hl=$('#cs_hl').value; cs.hlon=$('#cs_hlon').checked; cs.out=$('#cs_out').value;
   cs.size=+$('#cs_size').value; cs.words=+$('#cs_words').value; cs.upper=$('#cs_upper').checked; cs.pop=$('#cs_pop').checked;
@@ -1119,13 +1215,35 @@ function csPreview(){
 async function csInit(){
   const [styles,fonts]=await Promise.all([api('/api/styles'),api('/api/fonts')]);
   PRESETS=styles;
-  $('#cs_preset').innerHTML=Object.entries(PRESETS).map(([k,p])=>`<option value="${k}">${esc(p.label)}</option>`).join('');
+  $('#cs_preset').innerHTML='<option value="auto">✨ Auto (best for each clip)</option>'+
+    Object.entries(PRESETS).map(([k,p])=>`<option value="${k}">${esc(p.label)}</option>`).join('');
   $('#cs_font').innerHTML=fonts.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('');
-  const saved=csLoadSaved();
-  if(saved&&PRESETS[saved.preset]) cs=saved; else csFromPreset('highlight');
+  csFromPreset('highlight');                 // defaults for when you pick a look by hand
+  cs.preset='auto';                          // but always start on Auto
   csToUI();
 }
-$('#cs_preset').onchange=e=>{const m=cs.match;csFromPreset(e.target.value);cs.match=m;csToUI();csSave()};
+$('#cs_preset').onchange=e=>{const m=cs.match;
+  if(e.target.value==='auto'){cs.preset='auto'}else{csFromPreset(e.target.value);cs.match=m}
+  csToUI();csSave()};
+let restyleTarget=null;
+async function restyle(path,name){
+  const st=await api('/api/clipstyle?path='+encodeURIComponent(path));
+  if(st.error){alert(st.error);return}
+  restyleTarget=path; $('#rsname').textContent=name; $('#rsbar').style.display='';
+  cs={preset:st.preset||'highlight',match:false,font:st.font,size:st.size,text:st.text,
+      hl:st.highlight||'#FFE14D',hlon:!!st.highlight,out:st.outline,pos:st.pos,words:st.words,upper:st.upper,pop:st.pop};
+  $('#caps').checked=true; $('#capdet').style.display=''; $('#capdet').open=true; csToUI();
+  $('#capdet').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function endRestyle(){restyleTarget=null;$('#rsbar').style.display='none';cs.preset='auto';csToUI()}
+$('#rscancel').onclick=endRestyle;
+$('#rsapply').onclick=async()=>{
+  if(cs.preset==='auto'){alert('Pick a look first (not Auto)');return}
+  const r=await api('/api/restyle',{path:restyleTarget,style:cs.preset,match:cs.match,words:cs.words,
+    cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop}});
+  if(r.error){alert(r.error);return}
+  endRestyle(); poll(); window.scrollTo({top:document.querySelector('#jobs').offsetTop-20,behavior:'smooth'});
+};
 $('#cs_reset').onclick=()=>{const m=cs.match;csFromPreset(cs.preset);cs.match=m;csToUI();csSave()};
 ['cs_match','cs_font','cs_text','cs_hl','cs_hlon','cs_out','cs_size','cs_words','cs_upper','cs_pop'].forEach(id=>{
   $('#'+id).addEventListener('input',csFromUI); $('#'+id).addEventListener('change',csFromUI)});
@@ -1220,10 +1338,11 @@ async function loadClips(){
       <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip">
-        <video controls playsinline preload="none" poster="/thumb/${enc(c.path)}" src="/clips/${enc(c.path)}"></video>
+        <video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
+          ${c.styled?`<button class="rs" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
       </div>`).join('')}</div></div>`).join('');
 }
@@ -1330,6 +1449,14 @@ def serve_ui(args):
             if job["status"] == "cancelled":
                 continue
             p = job["params"]
+            if p.get("restyle"):
+                cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--restyle", p["restyle"],
+                       "--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
+                if p["match"]:
+                    cmd.append("--match-colors")
+                job["stage"] = "Re-rendering…"
+                run_job(job, cmd)
+                continue
             cmd = [sys.executable, "-u", str(Path(__file__).resolve()), p["url"], "--auto",
                    "-k", str(p["k"]), "--len", p["len"], "-m", p["mode"],
                    "--model", p["model"]]
@@ -1346,6 +1473,9 @@ def serve_ui(args):
             cmd += ["--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
             if p["match"]:
                 cmd.append("--match-colors")
+            run_job(job, cmd)
+
+    def run_job(job, cmd):
             job["status"], job["stage"] = "running", "Starting…"
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     start_new_session=True)
@@ -1409,6 +1539,7 @@ def serve_ui(args):
                 cap = f.with_suffix(".txt")
                 groups.setdefault(g, []).append(
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
+                     "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
         for name, clips in groups.items():
@@ -1523,6 +1654,13 @@ def serve_ui(args):
                 self.send_json(out)
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
+            elif u.path == "/api/clipstyle":
+                f = safe(parse_qs(u.query).get("path", [""])[0])
+                sf = f.with_suffix(".clip.json") if f else None
+                if not sf or not sf.is_file():
+                    self.send_json({"error": "No saved settings for this clip"})
+                else:
+                    self.send_json(json.loads(sf.read_text()).get("style", {}))
             elif u.path == "/api/styles":
                 self.send_json(CAPTION_PRESETS)
             elif u.path == "/api/fonts":
@@ -1570,7 +1708,7 @@ def serve_ui(args):
                     "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium") else "small",
                     "captions": bool(d.get("captions", True)),
                     "music": music, "music_vol": music_vol, "campaign": camp,
-                    "style": d.get("style") if d.get("style") in CAPTION_PRESETS else "highlight",
+                    "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "auto",
                     "match": bool(d.get("match")),
                     "words": max(1, min(8, int(d.get("words") or 3))),
                     "cap": clean_cap(d.get("cap")),
@@ -1579,6 +1717,24 @@ def serve_ui(args):
                 jid = uuid.uuid4().hex[:8]
                 job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
                        "progress": 0, "title": "" if is_url(url) else Path(url).name, "error": "", "made": 0, "k": params["k"],
+                       "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
+            elif u.path == "/api/restyle":
+                f = safe(str(d.get("path", "")))
+                if not f or not f.with_suffix(".clip.json").is_file():
+                    return self.send_json({"error": "Can't restyle that clip"}, 400)
+                params = {"restyle": str(f), "url": f.name,
+                          "style": d.get("style") if d.get("style") in CAPTION_PRESETS else "highlight",
+                          "match": bool(d.get("match")),
+                          "words": max(1, min(8, int(d.get("words") or 3))),
+                          "cap": clean_cap(d.get("cap"))}
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": f"Restyle: {f.stem}", "error": "", "made": 0, "k": 1,
                        "log": deque(maxlen=300), "proc": None}
                 with lock:
                     jobs[jid] = job
@@ -1606,8 +1762,9 @@ def serve_ui(args):
                 f, root = safe(str(d.get("path", "")), want_root=True)
                 if f and f.suffix == ".mp4":
                     f.unlink()
-                    if f.with_suffix(".txt").is_file():
-                        f.with_suffix(".txt").unlink()
+                    for extra in (f.with_suffix(".txt"), f.with_suffix(".clip.json")):
+                        if extra.is_file():
+                            extra.unlink()
                     folder = f.parent
                     if folder != root and not any(folder.glob("*.mp4")):
                         for x in folder.iterdir():
@@ -1668,8 +1825,9 @@ def main():
     p.add_argument("--no-captions", action="store_true", help="auto: turn captions off")
     p.add_argument("--model", default="small", help="whisper model: tiny/base/small/medium (default small)")
     p.add_argument("--words", type=int, default=None, help="words per caption line")
-    p.add_argument("--style", choices=list(CAPTION_PRESETS), default="highlight",
-                   help="caption look (default: highlight)")
+    p.add_argument("--style", choices=["auto"] + list(CAPTION_PRESETS), default="auto",
+                   help="caption look (default: auto = best for each clip)")
+    p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--match-colors", action="store_true",
                    help="match caption colours to the video")
     p.add_argument("--cap-font", help="caption font name (see --fonts)")
@@ -1706,6 +1864,8 @@ def main():
     if args.out_dir:
         args.out_dir = args.out_dir.expanduser()
 
+    if args.restyle:
+        return restyle_mode(args)
     if args.ui:
         args.out_dir = args.out_dir or OUT_DIR
         args.out_dir.mkdir(parents=True, exist_ok=True)

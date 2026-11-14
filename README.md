@@ -77,6 +77,7 @@ Useful options: `-m crop` (zoom instead of blur), `--model base` (faster transcr
 `--music background-songs` (random song per clip), `--ollama llama3.1` (smarter picks, see below).
 
 Clips go to `~/Clips/<video name>/` – or to the campaign's folder when you use a campaign.
+Short videos still give you the number of clips you asked for – extra clips overlap but open on a different line.
 Each run also writes a `clips.txt` you can edit and re-run with `--list clips.txt`.
 
 ### Smarter picks with Ollama (optional, free, local AI)
@@ -96,12 +97,17 @@ Pick a look in the web page (**Caption style**, with a live preview) or on the c
 
 | `--style` | Look |
 |---|---|
-| `highlight` (default) | Big white words, the spoken word lights up, pop-in |
+| `auto` (default) | Picks the best look for each clip from its colours, brightness, busyness and how fast people talk |
+| `highlight` | Big white words, the spoken word lights up, pop-in |
 | `classic` | White with black outline |
 | `box` | White text on a black box |
 | `neon` | Glowing outline |
 | `minimal` | Smaller, lower-case, near the bottom |
 | `bold-pop` | Huge yellow words, 2 at a time, in the middle |
+
+**Changing a clip afterwards:** every clip on the web page has a 🎨 button – it opens the caption panel
+with that clip's settings, tweak anything, then *Apply to this clip* re-renders just that one.
+From the command line: `./clipper.py --restyle path/to/clip.mp4 --style box --cap-pos middle`.
 
 `--match-colors` samples the clip and uses its main colour for the highlight / glow / box,
 so captions fit the video's look (gold footage → gold captions).
