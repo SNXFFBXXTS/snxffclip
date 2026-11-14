@@ -1,6 +1,6 @@
 # never upload videos, clips or music
-campaigns/**/source/
-campaigns/**/clips/
+# your campaigns stay on your PC only
+campaigns/
 background-songs/*
 !background-songs/.gitkeep
 *.mp4

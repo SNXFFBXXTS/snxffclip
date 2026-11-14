@@ -68,7 +68,7 @@ To use it from your phone, install [Tailscale](https://tailscale.com) on the PC 
 ./clipper.py "https://youtu.be/XXXX" --auto                 # 5 best clips
 ./clipper.py "https://youtu.be/XXXX" --auto -k 10 --len 15-30
 ./clipper.py "https://youtu.be/XXXX" --auto --dry-run       # just show the picks
-./clipper.py ~/Downloads/video.mp4 --auto --campaign cod-dmz
+./clipper.py ~/Downloads/video.mp4 --auto --campaign my-campaign
 ./clipper.py "https://youtu.be/XXXX" -s 1:23 -e 2:05 --captions   # pick times yourself
 ./clipper.py "https://youtu.be/XXXX" --audio                # rip the audio to ~/Music/rips
 ```
@@ -96,16 +96,37 @@ Rules for each clipping campaign live in `campaigns/<agency>/<campaign>/campaign
 
 ```
 campaigns/
-  clipping-culture/
-    cod-dmz/
+  some-agency/
+    some-campaign/
       campaign.json   <- the rules
       source/         <- footage (videos get moved here automatically)
       clips/          <- finished clips, captions, POSTING-CHECKLIST.txt
 ```
 
-Drop a new `something.json` straight into `campaigns/` and it gets filed under its `"agency"` automatically.
-See `campaigns/clipping-culture/cod-dmz/campaign.json` for all the fields
-(`music`, `min_len`, `len`, `on_screen`, `mention`, `required_lines`, `disclosure`, `hashtags`, `example_captions`, `checklist`…).
+Campaigns aren't included in this repo – make your own. Drop a `something.json` straight into
+`campaigns/` and it gets filed under its `"agency"` automatically. Example:
+
+```json
+{
+  "name": "Example Game Trailer",
+  "agency": "Some Agency",
+  "platforms": ["TikTok", "Instagram Reels"],
+  "music": false,
+  "min_len": 10,
+  "len": "12-35",
+  "mode": "blur",
+  "captions": true,
+  "on_screen": "Text burned on screen for the whole clip",
+  "mention": "@brand",
+  "required_lines": ["A line that must be in every caption"],
+  "disclosure": "#Ad",
+  "hashtags": ["#Game", "#Trailer"],
+  "max_extra_hashtags": 3,
+  "caption_rules": "Guidance for the AI caption writer (used with --ollama)",
+  "example_captions": ["Caption idea one", "Caption idea two"],
+  "checklist": ["Things to tick off before posting"]
+}
+```
 
 **Always read each campaign's full rules yourself** and check every caption matches its clip before posting.
 
