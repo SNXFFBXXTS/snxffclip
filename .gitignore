@@ -13,3 +13,5 @@ background-songs/*
 *.m4a
 ui.log
 __pycache__/
+fonts/*
+!fonts/.gitkeep

@@ -356,38 +356,188 @@ def ollama_pick(cands, k, model):
 # ======================================================================
 # captions + rendering
 # ======================================================================
-def build_ass(words, offset, tmp: Path, per_line=3, overlay=None, duration=0.0):
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+
+# caption looks. "accent" = which colour "match video colours" replaces
+CAPTION_PRESETS = {
+    "highlight": dict(label="Word highlight", font="DejaVu Sans", size=88, text="#FFFFFF",
+                      highlight="#FFE14D", outline="#000000", outline_w=7, shadow=2,
+                      box=False, upper=True, pos="lower", words=3, pop=True, glow=False,
+                      accent="highlight"),
+    "classic":   dict(label="Classic", font="DejaVu Sans", size=86, text="#FFFFFF",
+                      highlight="", outline="#000000", outline_w=6, shadow=2,
+                      box=False, upper=True, pos="lower", words=3, pop=False, glow=False,
+                      accent="outline"),
+    "box":       dict(label="Black box", font="DejaVu Sans", size=72, text="#FFFFFF",
+                      highlight="", outline="#000000", outline_w=16, shadow=0,
+                      box=True, upper=False, pos="lower", words=4, pop=False, glow=False,
+                      accent="box"),
+    "neon":      dict(label="Neon glow", font="DejaVu Sans", size=84, text="#FFFFFF",
+                      highlight="", outline="#00E5FF", outline_w=5, shadow=0,
+                      box=False, upper=True, pos="lower", words=3, pop=True, glow=True,
+                      accent="outline"),
+    "minimal":   dict(label="Minimal", font="DejaVu Sans", size=64, text="#FFFFFF",
+                      highlight="", outline="#000000", outline_w=3, shadow=1,
+                      box=False, upper=False, pos="bottom", words=5, pop=False, glow=False,
+                      accent="highlight"),
+    "bold-pop":  dict(label="Bold pop", font="DejaVu Sans", size=110, text="#FFE14D",
+                      highlight="", outline="#000000", outline_w=9, shadow=3,
+                      box=False, upper=True, pos="middle", words=2, pop=True, glow=False,
+                      accent="text"),
+}
+POSITIONS = {  # alignment, margin from edge
+    "top": (8, 480), "middle": (5, 0), "lower": (2, 520), "bottom": (2, 230),
+}
+
+
+def ass_col(hexcol, alpha=0):
+    h = (hexcol or "#FFFFFF").lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
+        h = "FFFFFF"
+    return f"&H{alpha:02X}{h[4:6]}{h[2:4]}{h[0:2]}".upper()
+
+
+def ass_inline(hexcol):
+    h = (hexcol or "#FFFFFF").lstrip("#")
+    return f"&H{h[4:6]}{h[2:4]}{h[0:2]}&".upper()
+
+
+def shade(hexcol, f):
+    h = hexcol.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return "#%02X%02X%02X" % tuple(max(0, min(255, int(c * f))) for c in (r, g, b))
+
+
+def accent_color(video: Path):
+    """Most eye-catching colour in the clip (for 'match video colours')."""
+    import colorsys
+    import numpy as np
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(video), "-vf",
+                        "fps=2,scale=64:36", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                       capture_output=True)
+    px = np.frombuffer(r.stdout, dtype=np.uint8).reshape(-1, 3).astype(float) / 255
+    if len(px) < 50:
+        return None
+    mx, mn = px.max(axis=1), px.min(axis=1)
+    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0)
+    keep = (sat > 0.35) & (mx > 0.35)
+    if keep.mean() < 0.01:
+        return None                                   # black & white footage
+    sel = px[keep]
+    hues = np.array([colorsys.rgb_to_hsv(*p)[0] for p in sel[:: max(1, len(sel) // 4000)]])
+    w = (sat[keep] * mx[keep])[:: max(1, len(sel) // 4000)]
+    hist, edges = np.histogram(hues, bins=24, range=(0, 1), weights=w)
+    b = hist.argmax()
+    hue = (edges[b] + edges[b + 1]) / 2
+    rr, gg, bb = colorsys.hsv_to_rgb(hue, 0.85, 1.0)  # punchy, readable version
+    return "#%02X%02X%02X" % (int(rr * 255), int(gg * 255), int(bb * 255))
+
+
+def resolve_style(args, video=None):
+    st = dict(CAPTION_PRESETS.get(getattr(args, "style", None) or "highlight",
+                                  CAPTION_PRESETS["highlight"]))
+    camp = getattr(args, "campaign_data", None)
+    if camp and isinstance(camp.get("caption_style"), dict):
+        st.update(camp["caption_style"])
+    for k, v in (getattr(args, "cap", None) or {}).items():
+        if v is not None and k in st:
+            st[k] = v
+    if getattr(args, "words", None):
+        st["words"] = args.words
+    if getattr(args, "match_colors", False) and video is not None:
+        acc = accent_color(video)
+        if acc:
+            print(f"  caption colour matched to video: {acc}")
+            slot = st.get("accent", "highlight")
+            if slot == "box":
+                st["outline"] = shade(acc, 0.32)
+            elif slot == "outline":
+                st["outline"] = acc
+            elif slot == "text":
+                st["text"] = acc
+            else:
+                st["highlight"] = acc
+    return st
+
+
+def build_ass(words, offset, tmp: Path, style=None, overlay=None, duration=0.0):
     """words: [(start,end,text)] in source time; offset = clip start.
-    overlay: fixed on-screen text shown at the top for the whole clip."""
+    style: dict from resolve_style(). overlay: fixed text at the top for the whole clip."""
+    st = style or dict(CAPTION_PRESETS["highlight"])
     words = [w for w in words if w[2]]
     if not words and not overlay:
         return None
+    align, margin = POSITIONS.get(st.get("pos"), POSITIONS["lower"])
+    box = bool(st.get("box"))
+    out_c = ass_col(st["outline"], 0x30 if box else 0)
+    font = str(st.get("font") or "DejaVu Sans").replace(",", " ")
     ass = [
-        "[Script Info]", "ScriptType: v4.00+", f"PlayResX: {W}", f"PlayResY: {H}", "",
-        "[V4+ Styles]",
+        "[Script Info]", "ScriptType: v4.00+", f"PlayResX: {W}", f"PlayResY: {H}",
+        "WrapStyle: 0", "", "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: Cap,DejaVu Sans,86,&H00FFFFFF,&H0000FFFF,&H00000000,&H64000000,"
-        "-1,0,0,0,100,100,0,0,1,6,2,2,60,60,520,1",
-        "Style: Top,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,"
+        f"Style: Cap,{font},{int(st['size'])},{ass_col(st['text'])},{ass_col(st['text'])},"
+        f"{out_c},{out_c if box else ass_col('#000000', 0x60)},-1,0,0,0,100,100,0,0,"
+        f"{3 if box else 1},{float(st['outline_w']):g},{float(st['shadow']):g},{align},70,70,{margin},1",
+        f"Style: Top,{font},58,&H00FFFFFF,&H00FFFFFF,&H40000000,&H40000000,"
         "-1,0,0,0,100,100,0,0,3,18,0,8,90,90,250,1",
         "", "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    for i in range(0, len(words), per_line):
-        chunk = words[i:i + per_line]
-        text = " ".join(w[2] for w in chunk).upper().replace("{", "(").replace("}", ")")
-        s = chunk[0][0] - offset
-        e = (words[i + per_line][0] if i + per_line < len(words) else chunk[-1][1]) - offset
-        e = min(e, chunk[-1][1] - offset + 0.6)      # don't linger over silence
-        ass.append(f"Dialogue: 0,{fmt_ts(s)},{fmt_ts(e)},Cap,,0,0,0,,{text}")
+    per = max(1, int(st.get("words") or 3))
+    glow = r"\blur4" if st.get("glow") else ""
+    pop = r"\fscx72\fscy72\t(0,90,\fscx100\fscy100)" if st.get("pop") else ""
+    hl = st.get("highlight") or ""
+
+    def clean(t):
+        t = t.replace("{", "(").replace("}", ")").replace("\\", "/")
+        return t.upper() if st.get("upper") else t
+
+    for i in range(0, len(words), per):
+        chunk = words[i:i + per]
+        c_start = chunk[0][0] - offset
+        c_end = (words[i + per][0] if i + per < len(words) else chunk[-1][1]) - offset
+        c_end = min(c_end, chunk[-1][1] - offset + 0.6)
+        texts = [clean(w[2]) for w in chunk]
+        if hl and len(chunk) > 0:
+            # one event per word, active word in the highlight colour
+            for j, w in enumerate(chunk):
+                s0 = c_start if j == 0 else w[0] - offset
+                e0 = (chunk[j + 1][0] - offset) if j + 1 < len(chunk) else c_end
+                if e0 <= s0:
+                    continue
+                parts = [(f"{{\\c{ass_inline(hl)}}}{t}{{\\c{ass_inline(st['text'])}}}" if k == j else t)
+                         for k, t in enumerate(texts)]
+                tags = glow + (pop if j == 0 else "")
+                pre = f"{{{tags}}}" if tags else ""
+                ass.append(f"Dialogue: 0,{fmt_ts(s0)},{fmt_ts(e0)},Cap,,0,0,0,,{pre}" + " ".join(parts))
+        else:
+            tags = glow + pop
+            pre = f"{{{tags}}}" if tags else ""
+            ass.append(f"Dialogue: 0,{fmt_ts(c_start)},{fmt_ts(c_end)},Cap,,0,0,0,,{pre}" + " ".join(texts))
     if overlay:
         safe_txt = overlay.replace("{", "(").replace("}", ")").replace("\n", "\\N")
         ass.append(f"Dialogue: 1,{fmt_ts(0)},{fmt_ts(duration + 1)},Top,,0,0,0,,{safe_txt}")
     path = tmp / "caps.ass"
     path.write_text("\n".join(ass), encoding="utf-8")
     return path
+
+
+def list_fonts():
+    fams = set()
+    try:
+        r = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True, timeout=10)
+        fams |= {f.split(",")[0].strip() for f in r.stdout.splitlines() if f.strip()}
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if FONTS_DIR.is_dir():
+        for f in FONTS_DIR.iterdir():
+            if f.suffix.lower() in (".ttf", ".otf"):
+                r = subprocess.run(["fc-scan", "--format", "%{family}\n", str(f)],
+                                   capture_output=True, text=True)
+                fams |= {x.split(",")[0].strip() for x in r.stdout.splitlines() if x.strip()}
+    return sorted(fams, key=str.lower)
 
 
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
@@ -428,7 +578,8 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
     else:
         v = "[0:v]null[v0]"
     if subs:
-        v += f";[v0]subtitles='{subs}'[v]"
+        fd = f":fontsdir='{FONTS_DIR}'" if FONTS_DIR.is_dir() else ""
+        v += f";[v0]subtitles='{subs}'{fd}[v]"
     else:
         v += ";[v0]null[v]"
 
@@ -467,7 +618,8 @@ def make_clip(src, start, end, out: Path, args, words=None):
             else:
                 cap_words = [w for w in words if w[0] >= start - 0.05 and w[1] <= end + 0.05]
                 offset = start
-        subs = build_ass(cap_words, offset, tmp, args.words,
+        style = resolve_style(args, raw if getattr(args, "match_colors", False) else None)
+        subs = build_ass(cap_words, offset, tmp, style,
                          overlay=getattr(args, "on_screen", None), duration=end - start)
         music = pick_music(getattr(args, "music", None))
         if music:
@@ -803,6 +955,17 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
 .capbtn{display:block;width:calc(100% - 16px);margin:7px 8px 0;padding:7px 0;border:0;border-radius:8px;
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
+.capdet{margin-top:10px}
+.capdet summary{color:var(--dim);font-size:14px}
+.capwrap{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap}
+.capctl{flex:1;min-width:220px}
+.capctl label{font-size:12px;color:var(--dim)}
+.cols{display:flex;gap:10px}.cols>div{flex:1}
+input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-radius:8px;background:#0b0c10;padding:2px}
+.prev{width:162px;height:288px;border-radius:14px;overflow:hidden;position:relative;flex-shrink:0;margin:auto;
+  background:linear-gradient(160deg,#3a2f1a,#14161c 45%,#1d2a33);display:flex;justify-content:center;border:1px solid var(--line)}
+.pv{position:absolute;left:8px;right:8px;text-align:center;font-weight:800;line-height:1.15}
+.pvmatch{position:absolute;top:6px;right:6px;font-size:9px;background:#0009;color:#ffb03d;padding:2px 5px;border-radius:5px;display:none}
 </style></head><body>
 <h1>✂️ <span>Clipper</span></h1>
 
@@ -835,6 +998,35 @@ select:disabled{opacity:.45}
         <button type="button" data-v="medium">Best</button></div></div>
   </div>
   <label class="toggle"><input type="checkbox" id="caps" checked> Burn in captions</label>
+  <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">Word highlight</b></summary>
+   <div class="capwrap">
+    <div class="capctl">
+      <div class="field"><label>Look</label><select id="cs_preset"></select></div>
+      <label class="toggle" style="margin-top:10px"><input type="checkbox" id="cs_match">
+        Match colours to the video</label>
+      <div class="field" style="margin-top:10px"><label>Font</label><select id="cs_font"></select></div>
+      <div class="row cols">
+        <div><label>Text</label><input type="color" id="cs_text"></div>
+        <div><label>Highlight <input type="checkbox" id="cs_hlon" title="highlight the spoken word"></label>
+             <input type="color" id="cs_hl"></div>
+        <div><label id="cs_outlbl">Outline</label><input type="color" id="cs_out"></div>
+      </div>
+      <div class="field" style="margin-top:10px"><label>Size: <b id="cs_sizev"></b></label>
+        <input type="range" id="cs_size" min="40" max="160"></div>
+      <div class="field" style="margin-top:6px"><label>Words at a time: <b id="cs_wordsv"></b></label>
+        <input type="range" id="cs_words" min="1" max="6"></div>
+      <div class="field" style="margin-top:6px"><label>Position</label>
+        <div class="seg" id="cs_pos">
+          <button type="button" data-v="top">Top</button><button type="button" data-v="middle">Middle</button>
+          <button type="button" data-v="lower">Lower</button><button type="button" data-v="bottom">Bottom</button></div></div>
+      <div class="row" style="margin-top:4px">
+        <label class="toggle"><input type="checkbox" id="cs_upper"> ALL CAPS</label>
+        <label class="toggle"><input type="checkbox" id="cs_pop"> Pop-in</label></div>
+      <button type="button" class="small" id="cs_reset" style="margin-top:10px">Reset to look's defaults</button>
+    </div>
+    <div class="prev" id="prev"><div class="pv" id="pv"></div><div class="pvmatch" id="pvmatch">colours from video</div></div>
+   </div>
+  </details>
   <div class="row">
     <div class="field"><label>Background music</label>
       <select id="music"><option value="">No music</option></select></div>
@@ -880,6 +1072,66 @@ async function loadMusic(){
   if(!r.songs.length) sel.options[0].text='No music (add songs to '+r.folder+')';
 }
 loadMusic();
+
+/* ---------- caption style ---------- */
+let PRESETS={}, cs={};
+const CS_KEY='clipper_capstyle';
+function csLoadSaved(){try{return JSON.parse(localStorage.getItem(CS_KEY)||'null')}catch(e){return null}}
+function csSave(){try{localStorage.setItem(CS_KEY,JSON.stringify(cs))}catch(e){}}
+function csFromPreset(name){
+  const p=PRESETS[name]; cs={preset:name,match:cs.match||false,font:p.font,size:p.size,text:p.text,
+    hl:p.highlight||'#FFE14D',hlon:!!p.highlight,out:p.outline,pos:p.pos,words:p.words,upper:p.upper,pop:p.pop};
+}
+function csToUI(){
+  $('#cs_preset').value=cs.preset; $('#cs_match').checked=cs.match;
+  if(![...$('#cs_font').options].some(o=>o.value===cs.font)) $('#cs_font').add(new Option(cs.font,cs.font));
+  $('#cs_font').value=cs.font; $('#cs_text').value=cs.text; $('#cs_hl').value=cs.hl; $('#cs_hlon').checked=cs.hlon;
+  $('#cs_out').value=cs.out; $('#cs_size').value=cs.size; $('#cs_words').value=cs.words;
+  $('#cs_upper').checked=cs.upper; $('#cs_pop').checked=cs.pop;
+  document.querySelectorAll('#cs_pos button').forEach(b=>b.classList.toggle('on',b.dataset.v===cs.pos));
+  $('#cs_outlbl').textContent=PRESETS[cs.preset].box?'Box':(PRESETS[cs.preset].glow?'Glow':'Outline');
+  csPreview();
+}
+function csFromUI(){
+  cs.preset=$('#cs_preset').value; cs.match=$('#cs_match').checked; cs.font=$('#cs_font').value;
+  cs.text=$('#cs_text').value; cs.hl=$('#cs_hl').value; cs.hlon=$('#cs_hlon').checked; cs.out=$('#cs_out').value;
+  cs.size=+$('#cs_size').value; cs.words=+$('#cs_words').value; cs.upper=$('#cs_upper').checked; cs.pop=$('#cs_pop').checked;
+  csPreview(); csSave();
+}
+function csPreview(){
+  const p=PRESETS[cs.preset]||{}, pv=$('#pv'), k=288/1920;
+  $('#cs_sizev').textContent=cs.size; $('#cs_wordsv').textContent=cs.words;
+  $('#capsum').textContent=(p.label||cs.preset)+(cs.match?' · matched':'');
+  $('#pvmatch').style.display=cs.match?'':'none';
+  const sample=['the','new','site','is','called','X01'].slice(0,cs.words);
+  pv.innerHTML=sample.map((w,i)=>{let t=cs.upper?w.toUpperCase():w;
+    return (cs.hlon&&i===Math.min(1,sample.length-1))?`<span style="color:${cs.hl}">${t}</span>`:t}).join(' ');
+  pv.style.fontFamily=`"${cs.font}", sans-serif`; pv.style.fontSize=(cs.size*k*1.05)+'px'; pv.style.color=cs.text;
+  const o=Math.max(1,(p.outline_w||4)*k*0.9);
+  if(p.box){pv.style.textShadow='none';pv.innerHTML=`<span style="background:${cs.out}cc;padding:2px 5px;
+    box-decoration-break:clone;-webkit-box-decoration-break:clone">${pv.innerHTML}</span>`}
+  else if(p.glow){pv.style.textShadow=`0 0 ${o*2}px ${cs.out},0 0 ${o*4}px ${cs.out},0 0 1px ${cs.out}`}
+  else{const sh=[];for(let a=0;a<16;a++){sh.push(`${(Math.cos(a/8*Math.PI)*o).toFixed(1)}px ${(Math.sin(a/8*Math.PI)*o).toFixed(1)}px 0 ${cs.out}`)}
+    if(p.shadow) sh.push(`${o}px ${o*1.2}px ${o}px #0008`); pv.style.textShadow=sh.join(',')}
+  const pos={top:['8%',null],middle:['50%',null],lower:[null,'27%'],bottom:[null,'12%']}[cs.pos];
+  pv.style.top=pos[0]||''; pv.style.bottom=pos[1]||''; pv.style.transform=cs.pos==='middle'?'translateY(-50%)':'';
+}
+async function csInit(){
+  const [styles,fonts]=await Promise.all([api('/api/styles'),api('/api/fonts')]);
+  PRESETS=styles;
+  $('#cs_preset').innerHTML=Object.entries(PRESETS).map(([k,p])=>`<option value="${k}">${esc(p.label)}</option>`).join('');
+  $('#cs_font').innerHTML=fonts.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('');
+  const saved=csLoadSaved();
+  if(saved&&PRESETS[saved.preset]) cs=saved; else csFromPreset('highlight');
+  csToUI();
+}
+$('#cs_preset').onchange=e=>{const m=cs.match;csFromPreset(e.target.value);cs.match=m;csToUI();csSave()};
+$('#cs_reset').onclick=()=>{const m=cs.match;csFromPreset(cs.preset);cs.match=m;csToUI();csSave()};
+['cs_match','cs_font','cs_text','cs_hl','cs_hlon','cs_out','cs_size','cs_words','cs_upper','cs_pop'].forEach(id=>{
+  $('#'+id).addEventListener('input',csFromUI); $('#'+id).addEventListener('change',csFromUI)});
+$('#cs_pos').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;cs.pos=b.dataset.v;csToUI();csSave()});
+$('#caps').addEventListener('change',e=>$('#capdet').style.display=e.target.checked?'':'none');
+csInit();
 let camps={};
 async function loadCamps(){
   const r=await api('/api/campaigns'); camps={};
@@ -923,7 +1175,7 @@ $('#f').onsubmit=async e=>{
   e.preventDefault();
   $('#go').disabled=true;
   const r=await api('/api/jobs',{url:$('#url').value.trim(),k:+$('#k').value,len:opt.len,mode:opt.mode,
-    model:opt.model,captions:$('#caps').checked,campaign:$('#camp').value,music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+    model:opt.model,captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   $('#go').disabled=false;
   if(r.error){alert(r.error);return}
   $('#url').value='';
@@ -999,6 +1251,36 @@ def serve_ui(args):
     music_dir = Path(__file__).resolve().parent / "background-songs"
     music_dir.mkdir(parents=True, exist_ok=True)
 
+    _fonts = []
+
+    def fonts_cache():
+        if not _fonts:
+            _fonts.extend(list_fonts() or ["DejaVu Sans"])
+        return _fonts
+
+    def clean_cap(c):
+        if not isinstance(c, dict):
+            return {}
+        hexok = lambda v: isinstance(v, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", v)
+        out = {}
+        if isinstance(c.get("font"), str) and re.fullmatch(r"[\w .\-']{1,60}", c["font"]):
+            out["font"] = c["font"]
+        try:
+            out["size"] = max(30, min(180, int(c.get("size"))))
+        except (TypeError, ValueError):
+            pass
+        for k in ("text", "outline"):
+            if hexok(c.get(k)):
+                out[k] = c[k]
+        if c.get("highlight") == "" or hexok(c.get("highlight")):
+            out["highlight"] = c["highlight"]
+        if c.get("pos") in POSITIONS:
+            out["pos"] = c["pos"]
+        for k in ("upper", "pop"):
+            if isinstance(c.get(k), bool):
+                out[k] = c[k]
+        return out
+
     def songs():
         return sorted(f.name for f in music_dir.iterdir()
                       if f.is_file() and f.suffix.lower() in AUDIO_EXT)
@@ -1061,6 +1343,9 @@ def serve_ui(args):
                 cmd += ["--music", p["music"], "--music-vol", str(p["music_vol"])]
             if p["campaign"]:
                 cmd += ["--campaign", p["campaign"]]
+            cmd += ["--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
+            if p["match"]:
+                cmd.append("--match-colors")
             job["status"], job["stage"] = "running", "Starting…"
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     start_new_session=True)
@@ -1238,6 +1523,10 @@ def serve_ui(args):
                 self.send_json(out)
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
+            elif u.path == "/api/styles":
+                self.send_json(CAPTION_PRESETS)
+            elif u.path == "/api/fonts":
+                self.send_json(fonts_cache())
             elif u.path == "/api/music":
                 self.send_json({"songs": songs(), "folder": str(music_dir).replace(str(Path.home()), "~")})
             elif u.path == "/api/clips":
@@ -1281,6 +1570,10 @@ def serve_ui(args):
                     "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium") else "small",
                     "captions": bool(d.get("captions", True)),
                     "music": music, "music_vol": music_vol, "campaign": camp,
+                    "style": d.get("style") if d.get("style") in CAPTION_PRESETS else "highlight",
+                    "match": bool(d.get("match")),
+                    "words": max(1, min(8, int(d.get("words") or 3))),
+                    "cap": clean_cap(d.get("cap")),
                     "ollama": ollama if re.fullmatch(r"[\w.:/-]{1,60}", ollama) else "",
                 }
                 jid = uuid.uuid4().hex[:8]
@@ -1374,7 +1667,21 @@ def main():
     p.add_argument("-c", "--captions", action="store_true", help="burn in captions (auto: on by default)")
     p.add_argument("--no-captions", action="store_true", help="auto: turn captions off")
     p.add_argument("--model", default="small", help="whisper model: tiny/base/small/medium (default small)")
-    p.add_argument("--words", type=int, default=3, help="words per caption line")
+    p.add_argument("--words", type=int, default=None, help="words per caption line")
+    p.add_argument("--style", choices=list(CAPTION_PRESETS), default="highlight",
+                   help="caption look (default: highlight)")
+    p.add_argument("--match-colors", action="store_true",
+                   help="match caption colours to the video")
+    p.add_argument("--cap-font", help="caption font name (see --fonts)")
+    p.add_argument("--cap-size", type=int, help="caption font size (40-160)")
+    p.add_argument("--cap-color", help="caption text colour, e.g. #FFFFFF")
+    p.add_argument("--cap-highlight", help="active-word colour (empty = no highlight)")
+    p.add_argument("--cap-outline", help="outline / glow / box colour")
+    p.add_argument("--cap-pos", choices=list(POSITIONS), help="caption position")
+    p.add_argument("--cap-caps", choices=["on", "off"], help="ALL CAPS on/off")
+    p.add_argument("--cap-pop", choices=["on", "off"], help="pop-in animation on/off")
+    p.add_argument("--cap-json", help=argparse.SUPPRESS)
+    p.add_argument("--fonts", action="store_true", help="list fonts you can use")
     p.add_argument("--music", help="background music: a file, or a folder (random track per clip)")
     p.add_argument("--music-vol", type=float, default=0.15, help="music volume 0-1 (default 0.15)")
     p.add_argument("--music-start", type=float, default=0.0, help="start the music N seconds in")
@@ -1383,6 +1690,19 @@ def main():
     args = p.parse_args()
 
     need("ffmpeg")
+    if args.fonts:
+        print("\n".join(list_fonts()))
+        print(f"\nAdd more: put .ttf/.otf files in {FONTS_DIR}")
+        return
+    args.cap = {"font": args.cap_font, "size": args.cap_size, "text": args.cap_color,
+                "highlight": args.cap_highlight, "outline": args.cap_outline, "pos": args.cap_pos,
+                "upper": None if args.cap_caps is None else args.cap_caps == "on",
+                "pop": None if args.cap_pop is None else args.cap_pop == "on"}
+    if args.cap_json:
+        try:
+            args.cap.update({k: v for k, v in json.loads(args.cap_json).items() if v is not None})
+        except ValueError:
+            die("bad --cap-json")
     if args.out_dir:
         args.out_dir = args.out_dir.expanduser()
 
@@ -1391,7 +1711,7 @@ def main():
         args.out_dir.mkdir(parents=True, exist_ok=True)
         return serve_ui(args)
     if not args.source:
-        die("give a YouTube link or file (or use --ui)")
+        die("give a YouTube link or file (or use --ui, or --fonts)")
     if args.audio:
         return audio_mode(args)
     if args.auto:

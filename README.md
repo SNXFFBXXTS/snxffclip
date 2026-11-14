@@ -4,7 +4,7 @@ Turn YouTube videos (or any video file) into vertical clips for TikTok, YouTube 
 
 - **Auto mode** – transcribes the video and picks the best moments for you
 - Vertical 1080×1920 output (blurred background or zoom-crop)
-- Big burned-in captions
+- Big burned-in captions in 6 styles, with colours that can match the video
 - **Campaign profiles** – follows a clipping campaign's rules automatically (no music, on-screen text, ready-to-paste captions with `#Ad`, posting checklist)
 - Optional background music from your own folder, ducked under speech
 - Audio ripping
@@ -87,6 +87,34 @@ ollama pull llama3.1
 ```
 Then add `--ollama llama3.1`, or type `llama3.1` in the web page's AI box.
 With a campaign selected it also writes a caption for each clip based on what's actually said.
+
+---
+
+## Caption styles
+
+Pick a look in the web page (**Caption style**, with a live preview) or on the command line:
+
+| `--style` | Look |
+|---|---|
+| `highlight` (default) | Big white words, the spoken word lights up, pop-in |
+| `classic` | White with black outline |
+| `box` | White text on a black box |
+| `neon` | Glowing outline |
+| `minimal` | Smaller, lower-case, near the bottom |
+| `bold-pop` | Huge yellow words, 2 at a time, in the middle |
+
+`--match-colors` samples the clip and uses its main colour for the highlight / glow / box,
+so captions fit the video's look (gold footage → gold captions).
+
+Fine-tune anything: `--cap-font "Anton" --cap-size 100 --cap-color "#FFFFFF" --cap-highlight "#FF3D6E"
+--cap-outline "#000000" --cap-pos middle --cap-caps on --cap-pop on --words 2`
+
+**Fonts:** `./clipper.py --fonts` lists what you can use. For popular TikTok-style fonts download them
+from [Google Fonts](https://fonts.google.com) (Montserrat, Anton, Bebas Neue, Poppins…) and drop the
+`.ttf` files in the `fonts/` folder – they show up in the web page's font list after a restart.
+
+A campaign can set its own look with a `"caption_style": {...}` block using the same names
+(`font`, `size`, `text`, `highlight`, `outline`, `pos`, `upper`, `pop`, `words`).
 
 ---
 
