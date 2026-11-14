@@ -27,6 +27,7 @@ clips.txt format (one clip per line, # for comments):
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -654,7 +655,7 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
     run(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
          "-filter_complex", v, "-map", "[v]", "-map", amap,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(out)])
+         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", "-f", "mp4", str(out)])
 
 
 def make_clip(src, start, end, out: Path, args, words=None):
@@ -678,8 +679,15 @@ def make_clip(src, start, end, out: Path, args, words=None):
         music = pick_music(getattr(args, "music", None))
         if music:
             print(f"  music: {music.name}")
-        render(raw, out, args.mode, subs, music,
-               getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0))
+        # render next to the clip, then swap it in: the old clip stays playable
+        # (and safe) until the new one is completely finished
+        part = out.with_name(out.name + ".part")
+        try:
+            render(raw, part, args.mode, subs, music,
+                   getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0))
+            os.replace(part, out)
+        finally:
+            part.unlink(missing_ok=True)
     side = {"source": str(src), "start": start, "end": end, "words": win, "style": style,
             "mode": args.mode, "captions": bool(args.captions),
             "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
@@ -1035,9 +1043,32 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
-.rsbar{background:#2a1a22;border:1px solid var(--acc);border-radius:12px;padding:12px;margin-top:10px;font-size:14px}
 .autonote{font-size:12.5px;color:var(--dim);background:#0b0c10;border-radius:10px;padding:10px;margin-top:10px}
-.capctl.dis .field:not(.keep),.capctl.dis .row,.capctl.dis #cs_reset{opacity:.35;pointer-events:none}
+.looks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.looks button{background:#0b0c10;border:1px solid var(--line);color:var(--dim);border-radius:999px;
+  padding:7px 12px;font:inherit;font-size:13px;cursor:pointer}
+.looks button.on{border-color:var(--acc);color:var(--text);background:#2a1a22}
+.autonote a{color:var(--acc2)}
+.capwrap.auto .capctl{opacity:.6}
+.capwrap.auto .pv{opacity:.2}
+.autotag{display:none;position:absolute;inset:0;align-items:center;justify-content:center;text-align:center;
+  font-size:12px;font-weight:600;color:#ddd}
+.capwrap.auto .autotag{display:flex}
+#capbody{font-size:13px;color:var(--dim)}
+dialog#rsdlg{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:14px;
+  width:calc(100% - 24px);max-width:560px;max-height:calc(100dvh - 24px);overflow:auto;margin:auto}
+dialog#rsdlg::backdrop{background:#000b}
+.rshead{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:15px}
+.rshead b{word-break:break-all}
+.rsnow{font-size:12.5px;color:var(--dim);margin-top:6px}
+.clip .vw{position:relative}
+.clip .ov{display:none;position:absolute;inset:0;background:#000b;color:#fff;align-items:center;justify-content:center;
+  text-align:center;font-size:13px;font-weight:600;padding:10px}
+.clip.busy .ov{display:flex}
+.clip .badge{display:none;position:absolute;top:8px;left:8px;background:var(--ok);color:#06210f;font-size:12px;
+  font-weight:700;border-radius:8px;padding:3px 8px}
+.clip.fresh{border-color:var(--ok);box-shadow:0 0 0 2px var(--ok)}
+.clip.fresh .badge{display:block}
 .clip .a button.rs{border-color:var(--acc2);color:var(--acc2)}
 .capdet summary{color:var(--dim);font-size:14px}
 .capwrap{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap}
@@ -1081,17 +1112,13 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
         <button type="button" data-v="medium">Best</button></div></div>
   </div>
   <label class="toggle"><input type="checkbox" id="caps" checked> Burn in captions</label>
-  <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">Word highlight</b></summary>
-   <div id="rsbar" class="rsbar" style="display:none">
-     <div>🎨 Restyling <b id="rsname"></b></div>
-     <div class="row" style="margin-top:8px"><button type="button" class="go" id="rsapply" style="margin:0;padding:10px">Apply to this clip</button>
-       <button type="button" class="small" id="rscancel">Cancel</button></div></div>
-   <div id="autonote" class="autonote">✨ Clipper picks the best look for each clip from its colours, brightness and
-     how fast people talk. Change any clip afterwards with its <b>🎨 Restyle</b> button.</div>
+  <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">✨ Auto</b></summary>
+   <div id="capbody">
+   <div class="looks" id="looks"></div>
+   <div id="capnote" class="autonote"></div>
    <div class="capwrap">
     <div class="capctl">
-      <div class="field keep"><label>Look</label><select id="cs_preset"></select></div>
-      <label class="toggle" style="margin-top:10px"><input type="checkbox" id="cs_match">
+      <label class="toggle" style="margin-top:0"><input type="checkbox" id="cs_match">
         Match colours to the video</label>
       <div class="field" style="margin-top:10px"><label>Font</label><select id="cs_font"></select></div>
       <div class="row cols">
@@ -1113,7 +1140,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
         <label class="toggle"><input type="checkbox" id="cs_pop"> Pop-in</label></div>
       <button type="button" class="small" id="cs_reset" style="margin-top:10px">Reset to look's defaults</button>
     </div>
-    <div class="prev" id="prev"><div class="pv" id="pv"></div><div class="pvmatch" id="pvmatch">colours from video</div></div>
+    <div class="prev" id="prev"><div class="pv" id="pv"></div><div class="autotag">✨ picked<br>per clip</div><div class="pvmatch" id="pvmatch">colours from video</div></div>
+   </div>
    </div>
   </details>
   <div class="row">
@@ -1128,6 +1156,14 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
     </div></details>
   <button class="go" id="go">Find the best clips</button>
 </form>
+
+<dialog id="rsdlg">
+  <div class="rshead"><div>🎨 Restyle <b id="rsname"></b></div><button type="button" class="small" id="rsx">✕</button></div>
+  <div class="rsnow">Now: <b id="rsnow"></b> — pick a new look or change anything, then re-render.</div>
+  <div id="rsslot"></div>
+  <button type="button" class="go" id="rsapply">Re-render this clip</button>
+  <div class="rsnow" style="text-align:center;margin-top:8px">The old version stays until the new one is ready.</div>
+</dialog>
 
 <h2>Jobs</h2>
 <div id="jobs"><div class="empty">Nothing running</div></div>
@@ -1163,42 +1199,48 @@ async function loadMusic(){
 loadMusic();
 
 /* ---------- caption style ---------- */
-let PRESETS={}, cs={};
+// cs = your own style (always complete); cs.auto = let Clipper pick per clip instead
+let PRESETS={}, cs={auto:true};
 const CS_KEY='clipper_capstyle';
+let restyleTarget=null, mainCs=null;
 function csLoadSaved(){try{return JSON.parse(localStorage.getItem(CS_KEY)||'null')}catch(e){return null}}
-function csSave(){try{localStorage.setItem(CS_KEY,JSON.stringify(cs))}catch(e){}}
+function csSave(){if(restyleTarget)return;try{localStorage.setItem(CS_KEY,JSON.stringify(cs))}catch(e){}}
 function csFromPreset(name){
-  if(name==='auto'){cs.preset='auto';return}
-  const p=PRESETS[name]; cs={preset:name,match:cs.match||false,font:p.font,size:p.size,text:p.text,
+  const p=PRESETS[name]; cs={auto:false,preset:name,match:cs.match||false,font:p.font,size:p.size,text:p.text,
     hl:p.highlight||'#FFE14D',hlon:!!p.highlight,out:p.outline,pos:p.pos,words:p.words,upper:p.upper,pop:p.pop};
 }
+function csLabel(){return cs.auto?'✨ Auto':((PRESETS[cs.preset]||{}).label||cs.preset)+(cs.match?' · matched':'')}
+function capPayload(){return {font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,
+  pos:cs.pos,upper:cs.upper,pop:cs.pop}}
+function csChrome(){            // look buttons, summary, explanation
+  document.querySelectorAll('#looks button').forEach(b=>b.classList.toggle('on',cs.auto?b.dataset.v==='auto':b.dataset.v===cs.preset));
+  $('#capsum').textContent=csLabel();
+  $('.capwrap').classList.toggle('auto',cs.auto);
+  $('#capnote').innerHTML=cs.auto
+    ?'✨ <b>Auto</b> picks the look from the colours, brightness and how fast people talk. '+
+     '<b>Tap a look above, or change anything below</b>, to use your own style instead.'
+    :`Using your own style: <b>${esc(csLabel())}</b> — exactly as shown. <a href="#" id="toauto">Switch back to ✨ Auto</a>`;
+  const ta=$('#toauto'); if(ta) ta.onclick=e=>{e.preventDefault();cs.auto=true;csChrome();csSave()};
+}
 function csToUI(){
-  const auto=cs.preset==='auto';
-  $('#cs_preset').value=cs.preset; $('#cs_match').checked=auto?true:cs.match;
-  $('#cs_match').disabled=auto; $('.capctl').classList.toggle('dis',auto);
-  $('#autonote').style.display=auto&&!restyleTarget?'':'none';
-  if(auto){ $('#capsum').textContent='✨ Auto (best for each clip)'; $('#pv').innerHTML='<span style="font-size:11px;color:#aaa;font-weight:600">picked per clip</span>';
-    $('#pv').style.textShadow='none'; $('#pv').style.top='45%'; $('#pv').style.bottom=''; $('#pvmatch').style.display='none'; return }
   if(![...$('#cs_font').options].some(o=>o.value===cs.font)) $('#cs_font').add(new Option(cs.font,cs.font));
   $('#cs_font').value=cs.font; $('#cs_text').value=cs.text; $('#cs_hl').value=cs.hl; $('#cs_hlon').checked=cs.hlon;
-  $('#cs_out').value=cs.out; $('#cs_size').value=cs.size; $('#cs_words').value=cs.words;
+  $('#cs_out').value=cs.out; $('#cs_size').value=cs.size; $('#cs_words').value=cs.words; $('#cs_match').checked=cs.match;
   $('#cs_upper').checked=cs.upper; $('#cs_pop').checked=cs.pop;
   document.querySelectorAll('#cs_pos button').forEach(b=>b.classList.toggle('on',b.dataset.v===cs.pos));
   $('#cs_outlbl').textContent=(PRESETS[cs.preset]||{}).box?'Box':((PRESETS[cs.preset]||{}).glow?'Glow':'Outline');
-  csPreview();
+  csChrome(); csPreview();
 }
-function csFromUI(){
-  if($('#cs_preset').value==='auto'){cs.preset='auto';csToUI();return}
-  cs.preset=$('#cs_preset').value; cs.match=$('#cs_match').checked; cs.font=$('#cs_font').value;
+function csFromUI(){             // touching any control = use your own style
+  cs.auto=false; cs.match=$('#cs_match').checked; cs.font=$('#cs_font').value;
   cs.text=$('#cs_text').value; cs.hl=$('#cs_hl').value; cs.hlon=$('#cs_hlon').checked; cs.out=$('#cs_out').value;
   cs.size=+$('#cs_size').value; cs.words=+$('#cs_words').value; cs.upper=$('#cs_upper').checked; cs.pop=$('#cs_pop').checked;
-  csPreview(); csSave();
+  csChrome(); csPreview(); csSave();
 }
 function csPreview(){
   const p=PRESETS[cs.preset]||{}, pv=$('#pv'), k=288/1920;
   $('#cs_sizev').textContent=cs.size; $('#cs_wordsv').textContent=cs.words;
-  $('#capsum').textContent=(p.label||cs.preset)+(cs.match?' · matched':'');
-  $('#pvmatch').style.display=cs.match?'':'none';
+  $('#pvmatch').style.display=cs.match&&!cs.auto?'':'none';
   const sample=['the','new','site','is','called','X01'].slice(0,cs.words);
   pv.innerHTML=sample.map((w,i)=>{let t=cs.upper?w.toUpperCase():w;
     return (cs.hlon&&i===Math.min(1,sample.length-1))?`<span style="color:${cs.hl}">${t}</span>`:t}).join(' ');
@@ -1215,39 +1257,46 @@ function csPreview(){
 async function csInit(){
   const [styles,fonts]=await Promise.all([api('/api/styles'),api('/api/fonts')]);
   PRESETS=styles;
-  $('#cs_preset').innerHTML='<option value="auto">✨ Auto (best for each clip)</option>'+
-    Object.entries(PRESETS).map(([k,p])=>`<option value="${k}">${esc(p.label)}</option>`).join('');
+  $('#looks').innerHTML='<button type="button" data-v="auto">✨ Auto</button>'+
+    Object.entries(PRESETS).map(([k,p])=>`<button type="button" data-v="${k}">${esc(p.label)}</button>`).join('');
   $('#cs_font').innerHTML=fonts.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('');
-  csFromPreset('highlight');                 // defaults for when you pick a look by hand
-  cs.preset='auto';                          // but always start on Auto
+  const saved=csLoadSaved();
+  if(saved&&PRESETS[saved.preset]&&saved.font){cs=saved; cs.auto=saved.auto!==false}
+  else{csFromPreset('highlight'); cs.auto=true}
   csToUI();
 }
-$('#cs_preset').onchange=e=>{const m=cs.match;
-  if(e.target.value==='auto'){cs.preset='auto'}else{csFromPreset(e.target.value);cs.match=m}
-  csToUI();csSave()};
-let restyleTarget=null;
+$('#looks').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  const v=b.dataset.v;
+  if(v==='auto') cs.auto=true;
+  else if(v===cs.preset) cs.auto=false;               // back to your tweaks of this look
+  else{const m=cs.match;csFromPreset(v);cs.match=m}
+  csToUI();csSave()});
 async function restyle(path,name){
   const st=await api('/api/clipstyle?path='+encodeURIComponent(path));
   if(st.error){alert(st.error);return}
-  restyleTarget=path; $('#rsname').textContent=name; $('#rsbar').style.display='';
-  cs={preset:st.preset||'highlight',match:false,font:st.font,size:st.size,text:st.text,
+  mainCs=JSON.parse(JSON.stringify(cs)); restyleTarget=path; $('#rsname').textContent=name;
+  cs={auto:false,preset:PRESETS[st.preset]?st.preset:'highlight',match:false,font:st.font,size:st.size,text:st.text,
       hl:st.highlight||'#FFE14D',hlon:!!st.highlight,out:st.outline,pos:st.pos,words:st.words,upper:st.upper,pop:st.pop};
-  $('#caps').checked=true; $('#capdet').style.display=''; $('#capdet').open=true; csToUI();
-  $('#capdet').scrollIntoView({behavior:'smooth',block:'start'});
+  $('#rsnow').textContent=(PRESETS[cs.preset]||{}).label||cs.preset;
+  $('#rsslot').appendChild($('#capbody')); csToUI(); $('#rsdlg').showModal();
 }
-function endRestyle(){restyleTarget=null;$('#rsbar').style.display='none';cs.preset='auto';csToUI()}
-$('#rscancel').onclick=endRestyle;
+$('#rsdlg').addEventListener('close',()=>{       // put the panel back, restore your normal style
+  $('#capdet').appendChild($('#capbody')); restyleTarget=null;
+  if(mainCs){cs=mainCs;mainCs=null} csToUI();
+});
+$('#rsx').onclick=()=>$('#rsdlg').close();
 $('#rsapply').onclick=async()=>{
-  if(cs.preset==='auto'){alert('Pick a look first (not Auto)');return}
-  const r=await api('/api/restyle',{path:restyleTarget,style:cs.preset,match:cs.match,words:cs.words,
-    cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop}});
+  const path=restyleTarget;
+  const r=await api('/api/restyle',{path,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload()});
   if(r.error){alert(r.error);return}
-  endRestyle(); poll(); window.scrollTo({top:document.querySelector('#jobs').offsetTop-20,behavior:'smooth'});
+  $('#rsdlg').close(); await poll();
+  const el=clipEl(path); if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
 };
 $('#cs_reset').onclick=()=>{const m=cs.match;csFromPreset(cs.preset);cs.match=m;csToUI();csSave()};
 ['cs_match','cs_font','cs_text','cs_hl','cs_hlon','cs_out','cs_size','cs_words','cs_upper','cs_pop'].forEach(id=>{
   $('#'+id).addEventListener('input',csFromUI); $('#'+id).addEventListener('change',csFromUI)});
-$('#cs_pos').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;cs.pos=b.dataset.v;csToUI();csSave()});
+$('#cs_pos').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  cs.pos=b.dataset.v;cs.auto=false;csToUI();csSave()});
 $('#caps').addEventListener('change',e=>$('#capdet').style.display=e.target.checked?'':'none');
 csInit();
 let camps={};
@@ -1293,7 +1342,7 @@ $('#f').onsubmit=async e=>{
   e.preventDefault();
   $('#go').disabled=true;
   const r=await api('/api/jobs',{url:$('#url').value.trim(),k:+$('#k').value,len:opt.len,mode:opt.mode,
-    model:opt.model,captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+    model:opt.model,captions:$('#caps').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   $('#go').disabled=false;
   if(r.error){alert(r.error);return}
   $('#url').value='';
@@ -1318,11 +1367,19 @@ async function poll(){
       <details ${openLogs.has(j.id)?'open':''} ontoggle="logToggle('${j.id}',this.open)">
         <summary>Log</summary><pre>${esc(j.log.join('\n'))}</pre></details>
     </div>`).join('');
-  let refresh=false;
-  for(const j of jobs) if(j.status==='done'&&!finished.has(j.id)){finished.add(j.id);if(!first)refresh=true;}
+  busy={}; for(const j of jobs) if(j.clip&&(j.status==='running'||j.status==='queued')) busy[j.clip]=j;
+  let refresh=false; const fresh=[];
+  for(const j of jobs) if(j.status==='done'&&!finished.has(j.id)){finished.add(j.id);
+    if(!first){refresh=true;if(j.clip)fresh.push(j.clip)}}
   first=false;
-  if(refresh) loadClips();
+  if(refresh) await loadClips(); else markBusy();
+  fresh.forEach(p=>{const el=clipEl(p);if(!el)return;el.classList.add('fresh');
+    el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>el.classList.remove('fresh'),8000)});
 }
+let busy={};
+const clipEl=p=>[...document.querySelectorAll('.clip')].find(e=>e.dataset.path===p);
+function markBusy(){document.querySelectorAll('.clip').forEach(el=>{const j=busy[el.dataset.path];
+  el.classList.toggle('busy',!!j); el.querySelector('.ov').textContent=j?(j.status==='queued'?'🎨 Waiting to restyle…':'🎨 '+j.stage):''})}
 const openLogs=new Set();
 function logToggle(id,o){o?openLogs.add(id):openLogs.delete(id)}
 async function cancelJob(id){await api('/api/cancel',{id});poll()}
@@ -1337,14 +1394,16 @@ async function loadClips(){
     <div class="group"><div class="gname"><span>${esc(g.name)}</span>
       <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span></div>
     <div class="grid">${g.clips.map(c=>`
-      <div class="clip">
-        <video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
+      <div class="clip" data-path="${esc(c.path)}">
+        <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
+          <div class="ov"></div><div class="badge">✓ Restyled</div></div>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
-          ${c.styled?`<button class="rs" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
+          ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
       </div>`).join('')}</div></div>`).join('');
+  markBusy();
 }
 async function del(p){
   if(!confirm('Delete this clip?'))return;
@@ -1412,6 +1471,12 @@ def serve_ui(args):
     # ---------- job runner ----------
     def parse_line(job, line):
         line = line.rstrip()
+        if job.get("clip") and (m := re.search(r"time=(\d+):(\d+):([\d.]+)", line)):
+            t = int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
+            pct = min(t / job["dur"], 1) if job.get("dur") else 0
+            job["progress"] = max(job["progress"], 5 + 93 * pct)
+            job["stage"] = f"Re-rendering… {pct * 100:.0f}%"
+            return
         if not line or line.lstrip().startswith("frame="):
             return
         m = re.search(r"\[download\]\s+([\d.]+)%", line)
@@ -1435,7 +1500,7 @@ def serve_ui(args):
             job["stage"], job["progress"] = "AI is picking the best bits…", 61
         elif "top " in line and "moments" in line:
             job["stage"], job["progress"] = "Picked the moments", 62
-        elif line.startswith("> ") and re.match(r"> \d\d-", line):
+        elif line.startswith("> ") and re.match(r"> \d\d-", line) and not job.get("clip"):
             job["stage"] = f"Making clip {job['made'] + 1} of {job['k']}"
         elif line.strip().startswith("saved "):
             job["made"] += 1
@@ -1454,7 +1519,6 @@ def serve_ui(args):
                        "--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
                 if p["match"]:
                     cmd.append("--match-colors")
-                job["stage"] = "Re-rendering…"
                 run_job(job, cmd)
                 continue
             cmd = [sys.executable, "-u", str(Path(__file__).resolve()), p["url"], "--auto",
@@ -1476,7 +1540,7 @@ def serve_ui(args):
             run_job(job, cmd)
 
     def run_job(job, cmd):
-            job["status"], job["stage"] = "running", "Starting…"
+            job["status"], job["stage"] = "running", ("Re-rendering…" if job.get("clip") else "Starting…")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     start_new_session=True)
             job["proc"] = proc
@@ -1498,7 +1562,8 @@ def serve_ui(args):
                 job["stage"] = "Cancelled"
             elif rc == 0:
                 job["status"], job["progress"] = "done", 100
-                job["stage"] = f"Done — {job['made']} clips ready"
+                job["stage"] = ("Done — clip updated ✓" if job.get("clip")
+                                else f"Done — {job['made']} clips ready")
             else:
                 job["status"] = "error"
                 job["error"] = job.get("error") or "Something went wrong — open the log"
@@ -1566,7 +1631,15 @@ def serve_ui(args):
         st = f.stat()
         t = thumbs / (hashlib.md5(f"{f}|{st.st_mtime}".encode()).hexdigest() + ".jpg")
         if not t.exists():
-            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-ss", "1", "-i", str(f),
+            at = 1.0                                  # a frame with captions showing, so restyles are visible
+            try:
+                sd = json.loads(f.with_suffix(".clip.json").read_text())
+                if sd.get("captions") and sd.get("words"):
+                    w0 = sd["words"][0]
+                    at = max(0.3, min(w0[1] - sd["start"] + 0.15, sd["end"] - sd["start"] - 0.2))
+            except (OSError, ValueError, KeyError, TypeError, IndexError):
+                pass
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{at:.2f}", "-i", str(f),
                             "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "5", str(t)])
         return t if t.exists() else None
 
@@ -1616,6 +1689,7 @@ def serve_ui(args):
                 self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(end - start + 1))
             if download:
                 self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
@@ -1724,18 +1798,27 @@ def serve_ui(args):
                 q.put(job)
                 self.send_json({"id": jid})
             elif u.path == "/api/restyle":
-                f = safe(str(d.get("path", "")))
+                rel = str(d.get("path", ""))
+                f = safe(rel)
                 if not f or not f.with_suffix(".clip.json").is_file():
                     return self.send_json({"error": "Can't restyle that clip"}, 400)
+                with lock:
+                    if any(j.get("clip") == rel and j["status"] in ("queued", "running") for j in jobs.values()):
+                        return self.send_json({"error": "That clip is already being restyled"}, 400)
+                try:
+                    sd = json.loads(f.with_suffix(".clip.json").read_text())
+                    dur = float(sd["end"]) - float(sd["start"])
+                except (ValueError, KeyError, TypeError):
+                    dur = 0
                 params = {"restyle": str(f), "url": f.name,
-                          "style": d.get("style") if d.get("style") in CAPTION_PRESETS else "highlight",
+                          "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "highlight",
                           "match": bool(d.get("match")),
                           "words": max(1, min(8, int(d.get("words") or 3))),
                           "cap": clean_cap(d.get("cap"))}
                 jid = uuid.uuid4().hex[:8]
                 job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
-                       "progress": 0, "title": f"Restyle: {f.stem}", "error": "", "made": 0, "k": 1,
-                       "log": deque(maxlen=300), "proc": None}
+                       "progress": 0, "title": f"🎨 Restyle: {f.stem}", "error": "", "made": 0, "k": 1,
+                       "clip": rel, "dur": dur, "log": deque(maxlen=300), "proc": None}
                 with lock:
                     jobs[jid] = job
                     order.append(jid)
@@ -1846,6 +1929,8 @@ def main():
     p.add_argument("-o", "--out-dir", type=Path, default=None,
                    help="where clips go (default ~/Clips, or the campaign's clips folder)")
     args = p.parse_args()
+    import signal                                     # Cancel in the web page: clean up, keep old clip
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     need("ffmpeg")
     if args.fonts:

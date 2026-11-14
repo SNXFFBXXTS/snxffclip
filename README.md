@@ -93,7 +93,9 @@ With a campaign selected it also writes a caption for each clip based on what's 
 
 ## Caption styles
 
-Pick a look in the web page (**Caption style**, with a live preview) or on the command line:
+Pick a look in the web page (**Caption style**, with a live preview) or on the command line.
+On the web page **✨ Auto** is the default – tap any look, or change any setting, and it switches to
+your own style (shown exactly as you set it, remembered next time). *Switch back to ✨ Auto* undoes that.
 
 | `--style` | Look |
 |---|---|
@@ -105,8 +107,10 @@ Pick a look in the web page (**Caption style**, with a live preview) or on the c
 | `minimal` | Smaller, lower-case, near the bottom |
 | `bold-pop` | Huge yellow words, 2 at a time, in the middle |
 
-**Changing a clip afterwards:** every clip on the web page has a 🎨 button – it opens the caption panel
-with that clip's settings, tweak anything, then *Apply to this clip* re-renders just that one.
+**Changing a clip afterwards:** every clip on the web page has a 🎨 button – it opens a pop-up with
+that clip's current settings (or pick ✨ Auto). *Re-render this clip* redoes just that one: the card
+shows the progress and flashes *✓ Restyled* when the new version is in. The old version stays
+playable until then, and Cancel keeps it.
 From the command line: `./clipper.py --restyle path/to/clip.mp4 --style box --cap-pos middle`.
 
 `--match-colors` samples the clip and uses its main colour for the highlight / glow / box,
