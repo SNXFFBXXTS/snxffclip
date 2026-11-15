@@ -3056,7 +3056,11 @@ def serve_ui(args):
             elif u.path == "/api/aitest":
                 name = ai_name()
                 if not name:
-                    return self.send_json({"ok": False, "msg": "No AI is switched on"})
+                    st = load_settings()
+                    msg = ("Paste your API key first, then Save" if st.get("ai") == "claude"
+                           else "Type the Ollama model name first, then Save" if st.get("ai") == "ollama"
+                           else "AI is switched off")
+                    return self.send_json({"ok": False, "msg": msg})
                 r = ai_json('Reply with exactly this JSON: {"ok": true}', timeout=120)
                 self.send_json({"ok": bool(r and r.get("ok")), "msg": f"{name} answered ✓" if r
                                 else f"{name} didn't answer - " + ("check the API key and model, and that you have credit"
