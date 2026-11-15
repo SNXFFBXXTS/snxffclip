@@ -802,7 +802,8 @@ def apply_campaign(args, c):
     print(f"> campaign: {c.get('name', c['id'])}  ({c.get('agency', 'Other')})")
     if args.out_dir is None:
         args.out_dir = campaign_dir(c["id"]) / "clips"
-    args.source = file_into_campaign(args.source, c)
+    if args.source and not Path(str(args.source)).expanduser().is_dir():
+        args.source = file_into_campaign(args.source, c)
     if not c.get("music", True) and getattr(args, "music", None):
         print("  ! this campaign doesn't allow added music - music turned OFF")
     if not c.get("music", True):
@@ -907,8 +908,13 @@ def auto_mode(args):
         cands.sort(key=lambda c: c["score"], reverse=True)
         print(f"  {hits} possible clips mention: {', '.join(kws)}")
 
-    picks = ollama_pick(cands, args.k, args.ollama) if args.ollama else None
-    picks = picks or pick(cands, args.k)
+    k = args.k
+    if not k:                                  # auto: about one clip per 2.5 minutes
+        dur = segs[-1]["end"] - segs[0]["start"]
+        k = max(2, min(10, round(dur / 150)))
+        print(f"  {short_ts(dur)} of speech - making {k} clips")
+    picks = ollama_pick(cands, k, args.ollama) if args.ollama else None
+    picks = picks or pick(cands, k)
     for c in picks:
         if not c.get("title"):
             c["title"] = " ".join(segs[c["i"]]["text"].split()[:6])
@@ -970,6 +976,44 @@ def audio_mode(args):
                  "m4a": ["-c:a", "aac", "-b:a", "256k"]}[args.audio_format]
         run(cmd + ["-i", str(f), "-vn", *codec, str(out)])
     print(f"\ndone - audio saved in {out_dir}")
+
+
+def batch_mode(args):
+    """Clip every video in a folder (default: the campaign's source folder)."""
+    c = getattr(args, "campaign_data", None)
+    if args.source:
+        folder = Path(args.source).expanduser()
+        if not folder.is_dir():
+            die(f"--batch needs a folder: {folder}")
+    elif c:
+        folder = campaign_dir(c["id"]) / "source"
+    else:
+        die("--batch needs a campaign (--campaign NAME) or a folder of videos")
+    vids = sorted(f for f in folder.iterdir() if f.suffix.lower() in VIDEO_EXT)
+    if c and folder.resolve() != (campaign_dir(c["id"]) / "source").resolve():
+        vids = [Path(file_into_campaign(str(v), c)) for v in vids]   # file them into the campaign
+    todo = []
+    for v in vids:
+        done = args.out_dir / slug(v.stem, 50)
+        if not args.redo and done.is_dir() and any(done.glob("*.mp4")):
+            print(f"  skipping {v.name} (already has clips - use --redo to do it again)")
+            continue
+        todo.append(v)
+    if not todo:
+        print("nothing new to clip")
+        return
+    print(f"> batch: {len(todo)} video(s)")
+    failed = []
+    for i, v in enumerate(todo, 1):
+        print(f"\n=== video {i}/{len(todo)}: {v.name} ===")
+        args.source = str(v)
+        try:
+            auto_mode(args)
+        except SystemExit:
+            failed.append(v.name)
+            print(f"  ! skipped {v.name}")
+    print(f"\nbatch done - {len(todo) - len(failed)} of {len(todo)} videos clipped"
+          + (f" (problems with: {', '.join(failed)})" if failed else ""))
 
 
 def list_mode(args):
@@ -1100,7 +1144,10 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
     <select id="camp" style="margin-top:5px"><option value="">No campaign (free clipping)</option></select>
     <div id="campnote" class="s" style="color:var(--acc2);font-size:12px;margin-top:5px"></div>
     <div id="srcbox" style="display:none;margin-top:10px"><label style="font-size:12px;color:var(--dim)">Footage</label>
-      <select id="src" style="margin-top:5px"></select></div></div>
+      <select id="src" style="margin-top:5px"></select>
+      <button type="button" class="go" id="batchgo" style="display:none;margin-top:10px;padding:12px;
+        background:linear-gradient(90deg,#3d7bff,#7a3dff)"></button>
+      <div class="s" id="batchnote" style="font-size:12px;color:var(--dim);margin-top:6px"></div></div></div>
   <div class="row">
     <div class="field"><label>Clips: <b id="kv">5</b></label>
       <input type="range" id="k" min="1" max="15" value="5"></div>
@@ -1337,7 +1384,22 @@ async function loadSources(){
   if(r.downloads.length) h+='<optgroup label="New in Downloads (will be moved in)">'+
     r.downloads.map(p=>`<option value="${esc(p)}">📥 ${esc(base(p))}</option>`).join('')+'</optgroup>';
   $('#src').innerHTML=h; $('#srcbox').style.display='';
+  const b=$('#batchgo');
+  if(r.pending){b.style.display='';b.textContent=`⚡ Clip ALL new footage (${r.pending} video${r.pending>1?'s':''})`;}
+  else b.style.display='none';
+  $('#batchnote').textContent=r.pending?`Clips every video in ${r.folder} that hasn't been done yet. The number of clips per video depends on its length.`
+    :`Tip: put all the campaign's videos in ${r.folder} to clip them in one go.`;
 }
+$('#batchgo').onclick=async()=>{
+  const b=$('#batchgo'); b.disabled=true;
+  const r=await api('/api/jobs',{batch:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,
+    captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
+    music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+  b.disabled=false;
+  if(r.error){alert(r.error);return}
+  poll(); setTimeout(loadSources,3000);
+};
 $('#src').onchange=e=>{ if(e.target.value) $('#url').value=e.target.value; };
 loadCamps();
 function copyText(t,btn){
@@ -1480,8 +1542,22 @@ def serve_ui(args):
     lock = threading.Lock()
 
     # ---------- job runner ----------
+    def P(job, v):
+        """map a single-video progress value onto the whole batch"""
+        if job.get("bi"):
+            i, n = job["bi"]
+            return ((i - 1) + v / 100) / n * 100
+        return v
+
     def parse_line(job, line):
         line = line.rstrip()
+        if m := re.match(r"=== video (\d+)/(\d+): (.*) ===", line):
+            job["bi"] = (int(m[1]), int(m[2]))
+            job["title"] = f"{m[3]}  ({m[1]} of {m[2]})"
+            job["mv"], job["kv"] = 0, 1
+            job["progress"] = P(job, 0)
+            job["log"].append(line)
+            return
         if job.get("clip") and (m := re.search(r"time=(\d+):(\d+):([\d.]+)", line)):
             t = int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
             pct = min(t / job["dur"], 1) if job.get("dur") else 0
@@ -1492,7 +1568,7 @@ def serve_ui(args):
             return
         m = re.search(r"\[download\]\s+([\d.]+)%", line)
         if m:
-            job["progress"] = max(job["progress"], min(10, float(m[1]) / 10))
+            job["progress"] = max(job["progress"], P(job, min(10, float(m[1]) / 10)))
             job["stage"] = f"Downloading {float(m[1]):.0f}%"
             return                                  # too chatty for the log
         job["log"].append(line)
@@ -1500,22 +1576,28 @@ def serve_ui(args):
             job["title"] = m[1]
             job["stage"] = "Downloading"
             if "cached" in line:
-                job["progress"] = 10
+                job["progress"] = P(job, 10)
         elif line.startswith("> analysing"):
-            job["stage"], job["progress"] = "Listening to the video…", 10
+            job["stage"], job["progress"] = "Listening to the video…", P(job, 10)
         elif m := re.match(r"\s*([\d:]+) / ([\d:]+)$", line):
             done, total = to_seconds(m[1]), to_seconds(m[2]) or 1
-            job["progress"] = 10 + 50 * min(done / total, 1)
+            job["progress"] = P(job, 10 + 50 * min(done / total, 1))
             job["stage"] = f"Transcribing {m[1]} / {m[2]}"
         elif "asking ollama" in line:
-            job["stage"], job["progress"] = "AI is picking the best bits…", 61
-        elif "top " in line and "moments" in line:
-            job["stage"], job["progress"] = "Picked the moments", 62
+            job["stage"], job["progress"] = "AI is picking the best bits…", P(job, 61)
+        elif m := re.search(r"top (\d+) moments", line):
+            job["kv"] = int(m[1])
+            if not job.get("bi"):
+                job["k"] = int(m[1])
+            job["stage"], job["progress"] = "Picked the moments", P(job, 62)
         elif line.startswith("> ") and re.match(r"> \d\d-", line) and not job.get("clip"):
-            job["stage"] = f"Making clip {job['made'] + 1} of {job['k']}"
+            n = job.get("mv", job["made"]) + 1
+            job["stage"] = f"Making clip {n} of {job.get('kv') or job['k']}"
         elif line.strip().startswith("saved "):
             job["made"] += 1
-            job["progress"] = 62 + 38 * job["made"] / job["k"]
+            job["mv"] = job.get("mv", 0) + 1
+            per = job["mv"] / max(1, job.get("kv") or job["k"])
+            job["progress"] = P(job, 62 + 38 * min(per, 1))
         elif line.startswith("error:"):
             job["error"] = line[6:].strip()
 
@@ -1532,9 +1614,14 @@ def serve_ui(args):
                     cmd.append("--match-colors")
                 run_job(job, cmd)
                 continue
-            cmd = [sys.executable, "-u", str(Path(__file__).resolve()), p["url"], "--auto",
-                   "-k", str(p["k"]), "--len", p["len"], "-m", p["mode"],
-                   "--model", p["model"]]
+            if p.get("batch"):
+                cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--batch",
+                       "--len", p["len"], "-m", p["mode"], "--model", p["model"]]
+                job["k"] = 1
+            else:
+                cmd = [sys.executable, "-u", str(Path(__file__).resolve()), p["url"], "--auto",
+                       "-k", str(p["k"]), "--len", p["len"], "-m", p["mode"],
+                       "--model", p["model"]]
             if not p["campaign"]:
                 cmd += ["-o", str(out_root)]
             if not p["captions"]:
@@ -1636,7 +1723,14 @@ def serve_ui(args):
             dl = sorted((str(f) for f in dd.iterdir()
                          if f.suffix.lower() in VIDEO_EXT and f.stat().st_mtime > cutoff),
                         key=lambda x: Path(x).stat().st_mtime, reverse=True)
-        return {"source": src, "downloads": dl}
+        pending, folder = 0, ""
+        if src:
+            cl = campaign_dir(cid) / "clips"
+            pending = sum(1 for f in src
+                          if not any((cl / slug(Path(f).stem, 50)).glob("*.mp4")))
+        if cid:
+            folder = str(campaign_dir(cid) / "source").replace(str(Path.home()), "~")
+        return {"source": src, "downloads": dl, "pending": pending, "folder": folder}
 
     def thumb_for(f: Path):
         st = f.stat()
@@ -1765,9 +1859,12 @@ def serve_ui(args):
             u, d = urlparse(self.path), self.body()
             if u.path == "/api/jobs":
                 url = str(d.get("url", "")).strip()
-                if not url:
+                batch = bool(d.get("batch"))
+                if batch and not d.get("campaign"):
+                    return self.send_json({"error": "Pick a campaign first"}, 400)
+                if not url and not batch:
                     return self.send_json({"error": "Paste a link first"}, 400)
-                if not is_url(url) and not Path(url).expanduser().is_file():
+                if not batch and not is_url(url) and not Path(url).expanduser().is_file():
                     return self.send_json({"error": "That's not a link or a file on this PC"}, 400)
                 ollama = str(d.get("ollama") or "")
                 camp = str(d.get("campaign") or "")
@@ -1787,7 +1884,8 @@ def serve_ui(args):
                     music_vol = 0.15
                 params = {
                     "url": url,
-                    "k": max(1, min(20, int(d.get("k") or 5))),
+                    "k": 0 if batch else max(1, min(20, int(d.get("k") or 5))),
+                    "batch": batch,
                     "len": d.get("len") if d.get("len") in ("15-30", "20-60", "45-90") else "20-60",
                     "mode": d.get("mode") if d.get("mode") in ("blur", "crop", "none") else "blur",
                     "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium") else "small",
@@ -1801,7 +1899,7 @@ def serve_ui(args):
                 }
                 jid = uuid.uuid4().hex[:8]
                 job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
-                       "progress": 0, "title": "" if is_url(url) else Path(url).name, "error": "", "made": 0, "k": params["k"],
+                       "progress": 0, "title": "Clipping all footage" if batch else ("" if is_url(url) else Path(url).name), "error": "", "made": 0, "k": params["k"],
                        "log": deque(maxlen=300), "proc": None}
                 with lock:
                     jobs[jid] = job
@@ -1904,7 +2002,11 @@ def main():
     p.add_argument("--audio-format", choices=["mp3", "wav", "flac", "m4a"], default="mp3")
     p.add_argument("--audio-dir", default="~/Music/rips", help="where ripped audio goes")
     p.add_argument("-a", "--auto", action="store_true", help="find the best moments automatically")
-    p.add_argument("-k", type=int, default=5, help="auto: how many clips (default 5)")
+    p.add_argument("-k", type=int, default=None,
+                   help="auto: how many clips (default 5; 0 = decide from video length)")
+    p.add_argument("--batch", action="store_true",
+                   help="clip every video in a campaign's source folder (or in the folder you give)")
+    p.add_argument("--redo", action="store_true", help="batch: also redo videos that already have clips")
     p.add_argument("--len", default="20-60", help="auto: clip length range in seconds (default 20-60)")
     p.add_argument("--target", type=float, help="auto: preferred clip length (default: middle of --len)")
     p.add_argument("--ollama", metavar="MODEL", help="auto: use a local ollama model to pick + title")
@@ -1966,10 +2068,16 @@ def main():
         args.out_dir = args.out_dir or OUT_DIR
         args.out_dir.mkdir(parents=True, exist_ok=True)
         return serve_ui(args)
-    if not args.source:
-        die("give a YouTube link or file (or use --ui, or --fonts)")
+    if not args.source and not args.batch:
+        die("give a YouTube link or file (or use --ui, --batch or --fonts)")
     if args.audio:
         return audio_mode(args)
+    if args.batch:
+        args.auto = True
+        if args.k is None:
+            args.k = 0                         # decide per video
+    if args.k is None:
+        args.k = 5
     if args.auto:
         args.captions = not args.no_captions
     args.campaign_data = None
@@ -1978,7 +2086,9 @@ def main():
         apply_campaign(args, args.campaign_data)
     args.out_dir = args.out_dir or OUT_DIR
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    if args.auto:
+    if args.batch:
+        batch_mode(args)
+    elif args.auto:
         auto_mode(args)
     elif args.list:
         list_mode(args)

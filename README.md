@@ -77,6 +77,11 @@ Useful options: `-m crop` (zoom instead of blur), `--model base` (faster transcr
 `--music background-songs` (random song per clip), `--ollama llama3.1` (smarter picks, see below).
 
 Clips go to `~/Clips/<video name>/` – or to the campaign's folder when you use a campaign.
+**Whole folder at once:** put a campaign's videos in its `source/` folder and press **⚡ Clip ALL new footage**
+in the web page (or run `./clipper.py --batch --campaign my-campaign`). Every video that hasn't been clipped yet
+gets done, with the number of clips based on its length (about one per 2½ minutes, 2–10).
+`./clipper.py ~/Downloads/some-folder --batch --campaign my-campaign` moves a folder of videos into the campaign first.
+
 Short videos still give you the number of clips you asked for – extra clips overlap but open on a different line.
 Each run also writes a `clips.txt` you can edit and re-run with `--list clips.txt`.
 
