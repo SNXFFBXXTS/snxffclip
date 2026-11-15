@@ -50,6 +50,43 @@ If you have an NVIDIA card without CUDA set up, it automatically falls back to t
 
 ---
 
+## Setup (Windows)
+Open **PowerShell** (Start menu → type *PowerShell*) and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/SNXFFBXXTS/snxffclip/main/windows/install.ps1 | iex
+```
+
+It installs Python, Git, ffmpeg and yt-dlp (with winget), puts clipper in your user folder (`clipper`) and
+adds a **Clipper** shortcut to the desktop – double-click it and the page opens. Keep the black window open
+while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
+again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
+
+## Setting up a campaign from a brief
+
+Every campaign has a brief (the rules page on Whop). Clipper needs those rules – music allowed or not,
+who to tag, #ad, platforms, clip length, on-screen text – so it can make clips that get approved.
+Pick whichever way suits you:
+
+1. **Free, built in (no AI needed)** – in the page press **+ New**, paste the whole brief and press
+   *Read the rules*. Clipper's own brief reader fills in the settings. Check every field (it can miss
+   things), then **Publish only** – or **🚀 Publish & clip everything** to also move the footage from Downloads
+   and start clipping. The green *✅ Campaign settings match the brief* line under the campaign picker
+   flags anything that looks wrong.
+2. **With a Claude API key** – press **⚙️ AI**, pick *Claude*, paste a key from console.anthropic.com
+   (pay as you go, pennies per brief). The same **+ New** button then reads briefs much more accurately,
+   and the AI also helps pick the best moments and write captions.
+3. **With Ollama (free, runs on your PC)** – install Ollama, pull a model, pick *Ollama* in **⚙️ AI**.
+   Slower than an API key and needs a decent PC, but costs nothing.
+4. **Fully hands-off with Claude Code** – open Claude Code in the clipper folder and paste the brief.
+   `CLAUDE.md` tells it exactly what to do: write the campaign, flag the tricky rules (music bans,
+   required tags, deadlines, audience rules, pay), move the footage in from Downloads, check it and clip
+   it. Then you just press 🎬 **Review**. Needs a Claude subscription (not an API key).
+
+After that it's the same for everyone: 🔎 **Scrape the whole folder** → 🎬 **Review** (keep/drop) →
+post using **Copy caption** and the platform buttons under each clip → submit the link on Whop within
+the time the brief gives.
+
 ## The web page
 
 ```sh
@@ -138,18 +175,6 @@ paste the link; it turns green. Platforms you haven't ticked as your accounts sh
 In 📈 Results, **⟳ Refresh views** reads the views and likes of every logged post straight from its link
 (with yt-dlp). It also does this quietly when the page opens, at most every 6 hours. TikTok works without
 logging in; Instagram usually needs you logged in to Instagram in Firefox – otherwise type those views in.
-
-### Windows
-Open **PowerShell** (Start menu → type *PowerShell*) and paste:
-
-```powershell
-irm https://raw.githubusercontent.com/SNXFFBXXTS/snxffclip/main/windows/install.ps1 | iex
-```
-
-It installs Python, Git, ffmpeg and yt-dlp (with winget), puts clipper in your user folder (`clipper`) and
-adds a **Clipper** shortcut to the desktop – double-click it and the page opens. Keep the black window open
-while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
-again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
 
 ### Logo watermark
 If a campaign needs the brand's logo on every clip, put the logo image (PNG with a transparent background is

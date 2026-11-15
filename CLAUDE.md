@@ -2,8 +2,10 @@
 
 This is the user's own clipping tool: `clipper.py` (one file, Python + ffmpeg + yt-dlp + faster-whisper)
 turns long videos into vertical short clips for paid clipping campaigns (Whop Content Rewards and
-similar). The user is on **EndeavourOS** with **kitty** and the **fish** shell – give fish-compatible
-commands. Explain things plainly; they're not a programmer by trade.
+similar). The main user is on **EndeavourOS** with **kitty** and the **fish** shell – give fish-compatible
+commands. Others use it on **Windows** (installed with `windows/install.ps1` into `%USERPROFILE%\clipper`,
+started from the desktop *Clipper* shortcut): if you're running on Windows, give PowerShell commands,
+use `py -3 clipper.py ...` instead of `./clipper.py ...`, and Downloads is `%USERPROFILE%\Downloads`. Explain things plainly; they're not a programmer by trade.
 
 ## The main job: "here's a campaign brief"
 
