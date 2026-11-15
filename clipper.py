@@ -406,26 +406,75 @@ def loudness_curve(path: Path):
     return (db - np.median(ref)) / (ref.std() + 1e-6)
 
 
+def split_sentences(segs):
+    """Whisper segments can hold several sentences (e.g. an answer AND the next question).
+    Split them on sentence ends using the word timings, so clips can end between them."""
+    out = []
+    end_re = re.compile(r"[.!?…][\"')\]]*$")
+    for s in segs:
+        ws = s.get("words") or []
+        if len(ws) < 4:
+            out.append(s)
+            continue
+        pieces, cur = [], []
+        for k, w in enumerate(ws):
+            cur.append(w)
+            if end_re.search(str(w[2]).strip()) and len(cur) >= 2 and len(ws) - k - 1 >= 2:
+                pieces.append(cur)
+                cur = []
+        if cur:
+            pieces.append(cur)
+        for k, ws_ in enumerate(pieces):
+            out.append(dict(s, words=ws_, text=" ".join(str(x[2]).strip() for x in ws_),
+                            start=s["start"] if k == 0 else ws_[0][0],
+                            end=s["end"] if k == len(pieces) - 1 else ws_[-1][1]))
+    return out
+
+
+def is_question(t):
+    return bool(re.search(r"\?[\"')\]]*\s*$", (t or "").strip()))
+
+
 def build_candidates(segs, min_len, max_len, target):
-    """Every sentence-aligned window between min_len and max_len seconds."""
+    """Every sentence-aligned window between min_len and max_len seconds.
+    Interview-aware: never end on a question, and don't end part-way through
+    the answer to a question asked inside the clip."""
     cands = []
     ends_sentence = lambda t: bool(re.search(r"[.!?…][\"')\]]*\s*$", t.strip()))
     stretch = min(10.0, max_len * 0.25)            # allowed overrun to let a sentence finish
-    for i in range(len(segs)):
+    n = len(segs)
+
+    def answer_done(j):
+        """After segs[j], is the answer over? (a pause, a new question, or the end)"""
+        if j + 1 >= n:
+            return True
+        gap = segs[j + 1]["start"] - segs[j]["end"]
+        return gap > 1.0 or is_question(segs[j + 1]["text"])
+
+    for i in range(n):
         best, best_end = None, None
-        for j in range(i, len(segs)):
+        last_q = None                              # last question asked inside the window
+        for j in range(i, n):
             if j > i and segs[j]["start"] - segs[j - 1]["end"] > 4.0:
                 break                              # long silence - don't bridge it
+            if j > i and is_question(segs[j]["text"]):
+                last_q = j
             dur = segs[j]["end"] - segs[i]["start"]
             if dur > max_len + stretch:
                 break
             if dur < min_len:
                 continue
+            if is_question(segs[j]["text"]):
+                continue                           # never end on a question (answer would be cut)
+            cut_answer = 0.0
+            if last_q is not None and not answer_done(j):
+                cut_answer = 8.0                   # mid-answer to a question asked in the clip
             if ends_sentence(segs[j]["text"]):
                 over = max(0.0, dur - max_len) * 3     # overrunning is allowed but discouraged
-                if best_end is None or abs(dur - target) + over < best_end[2]:
-                    best_end = (j, dur, abs(dur - target) + over)
-            if dur <= max_len and (best is None or abs(dur - target) < abs(best[1] - target)):
+                cost = abs(dur - target) + over + cut_answer
+                if best_end is None or cost < best_end[2]:
+                    best_end = (j, dur, cost)
+            if dur <= max_len and not cut_answer and (best is None or abs(dur - target) < abs(best[1] - target)):
                 best = (j, dur)
         if best_end:
             best = best_end[:2]                    # a finished sentence beats a closer length
@@ -458,7 +507,8 @@ def clean_bounds(segs, i, j, pre=0.45, post=1.1):
     if j + 1 < len(segs):
         nxt = first_word_start(segs[j + 1])
         end = min(end, e + (nxt - e) * 0.7) if nxt > e else e + 0.15
-        end = max(end, e + 0.35)          # whisper ends words a touch early
+        end = max(end, min(e + 0.35, nxt - 0.06))   # whisper ends words a touch early,
+                                                     # but don't catch the next sentence's first word
     return max(0.0, start), end
 
 
@@ -2039,6 +2089,7 @@ def find_moments(src, args, lo, hi, target):
             cands.sort(key=lambda c: c["score"], reverse=True)
         return segs, cands
     loud = loudness_curve(src)
+    segs = split_sentences(segs)                   # answers and questions become separate pieces
     cands = build_candidates(segs, lo, hi, target)
     if not cands:
         die(f"no {args.len}s windows found - try a different --len")
@@ -2326,8 +2377,9 @@ UI_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0f13">
 <title>Clipper</title>
+<script>try{var t=localStorage.getItem('clipper_theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 <style>
-:root{--bg:#0e0f13;--card:#181a21;--line:#262934;--text:#eceef3;--dim:#8b90a0;--acc:#ff3d6e;--acc2:#ffb03d;--ok:#3ddc97}
+:root{--field:#0b0c10;--acc3:#ff6a3d;--bg:#0e0f13;--card:#181a21;--line:#262934;--text:#eceef3;--dim:#8b90a0;--acc:#ff3d6e;--acc2:#ffb03d;--ok:#3ddc97}
 *{box-sizing:border-box;margin:0}
 body{background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;
      padding:16px 14px 60px;max-width:760px;margin:auto}
@@ -2335,22 +2387,22 @@ h1{font-size:26px;letter-spacing:-.5px;display:flex;align-items:center;gap:8px;m
 h1 span{background:linear-gradient(90deg,var(--acc),var(--acc2));-webkit-background-clip:text;color:transparent}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin:26px 0 10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
-input[type=text]{width:100%;background:#0b0c10;border:1px solid var(--line);color:var(--text);
+input[type=text]{width:100%;background:var(--field);border:1px solid var(--line);color:var(--text);
      border-radius:12px;padding:14px;font-size:16px;outline:none}
 input[type=text]:focus{border-color:var(--acc)}
 .row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
 .field{flex:1;min-width:140px}
 .field label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
-.seg{display:flex;background:#0b0c10;border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg{display:flex;background:var(--field);border:1px solid var(--line);border-radius:10px;padding:3px}
 .seg button{flex:1;background:none;border:0;color:var(--dim);padding:8px 4px;border-radius:8px;font:inherit;font-size:13px}
 .seg button.on{background:var(--line);color:var(--text)}
 input[type=range]{width:100%;accent-color:var(--acc)}
-select{width:100%;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:10px;
+select{width:100%;background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:10px;
        padding:10px;font:inherit;font-size:14px}
 .toggle{display:flex;align-items:center;gap:8px;font-size:14px;margin-top:14px}
 .toggle input{width:20px;height:20px;accent-color:var(--acc)}
 .go{width:100%;margin-top:16px;padding:15px;border:0;border-radius:12px;font:600 17px system-ui;color:#fff;
-    background:linear-gradient(90deg,var(--acc),#ff6a3d);cursor:pointer}
+    background:linear-gradient(90deg,var(--acc),var(--acc3));cursor:pointer}
 .go:active{transform:scale(.98)}
 .go:disabled{opacity:.5}
 details{margin-top:12px;color:var(--dim);font-size:13px}
@@ -2359,11 +2411,11 @@ summary{cursor:pointer}
 .job .top{display:flex;justify-content:space-between;gap:10px;align-items:start}
 .job .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .job .s{color:var(--dim);font-size:13px}
-.bar{height:6px;background:#0b0c10;border-radius:4px;margin-top:10px;overflow:hidden}
+.bar{height:6px;background:var(--field);border-radius:4px;margin-top:10px;overflow:hidden}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .6s}
 .job.done .bar i{background:var(--ok)}
 .job.error .s{color:var(--acc)}
-pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border-radius:8px;margin-top:8px;
+pre{white-space:pre-wrap;font-size:11.5px;background:var(--field);padding:10px;border-radius:8px;margin-top:8px;
     max-height:220px;overflow:auto;color:#b6bac6}
 .small{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;padding:5px 10px;font-size:12px}
 .group{margin-bottom:20px}
@@ -2378,14 +2430,14 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
 .clip .a button{background:none;border:1px solid var(--line);color:var(--dim)}
 .empty{color:var(--dim);text-align:center;padding:24px}
 .capbtn{display:block;width:calc(100% - 16px);margin:7px 8px 0;padding:7px 0;border:0;border-radius:8px;
-  background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
+  background:linear-gradient(90deg,var(--acc),var(--acc3));color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
 .rvman{display:flex;gap:10px;align-items:flex-start;background:#2a2110;border:1px solid #6b5420;border-radius:10px;
   padding:8px 10px;margin:0 0 8px;font-size:12.5px;color:#ffd98a}
 .rvman input{width:20px;height:20px;margin-top:2px;accent-color:#ffb03d;flex-shrink:0}
 .rvman.shake{animation:shk .35s}@keyframes shk{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
-.gpubox{margin-top:14px;background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:10px}
+.gpubox{margin-top:14px;background:var(--field);border:1px solid var(--line);border-radius:12px;padding:10px}
 .plset summary{color:var(--dim);font-size:13px;cursor:pointer}
 .pllist{max-height:55vh;overflow:auto}
 .plday{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:12px 0 4px}
@@ -2401,13 +2453,13 @@ select:disabled{opacity:.45}
 .rtable td,.rtable th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
 .rtable th{color:var(--dim);font-weight:500;font-size:11.5px}
 .rtable a,#pdlist a{color:var(--acc2)}
-.rtable input{width:80px;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
+.rtable input{width:80px;background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
 .rtable tr.stale input{border-color:#ffb03d}
 .rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
 .fplist{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
 .fplist div{padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13.5px}
 .fplist div:hover{background:var(--line)}
-#fpnew{background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font:inherit}
+#fpnew{background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font:inherit}
 .projroot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
 .projroot code{font-size:12.5px;word-break:break-all}
 .postedb{padding:2px 8px 0;font-size:11px;color:var(--ok)}
@@ -2461,13 +2513,13 @@ select:disabled{opacity:.45}
   width:min(680px,94vw);max-height:90vh}
 .cdlg::backdrop{background:#000b}
 .cdhead{display:flex;justify-content:space-between;align-items:center;font-size:17px}
-.cdlg textarea{width:100%;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:10px;
+.cdlg textarea{width:100%;background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:10px;
   padding:10px;font:inherit;font-size:13px;margin-top:4px;resize:vertical}
 .cdgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .cdgrid>label{font-size:12px;color:var(--dim);display:block}
 .cdgrid>label input[type=text]{margin-top:4px;padding:9px;font-size:14px}
 .cdgrid .wide{grid-column:1/-1}
-.dlbox{margin-top:14px;background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:10px}
+.dlbox{margin-top:14px;background:var(--field);border:1px solid var(--line);border-radius:12px;padding:10px}
 .dlhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
 .dllist{margin-top:8px;max-height:220px;overflow:auto}
 .dllist label{display:flex;gap:8px;align-items:center;padding:6px 2px;border-bottom:1px solid #1c1f28;font-size:13.5px}
@@ -2478,9 +2530,9 @@ select:disabled{opacity:.45}
 @media(max-width:520px){.cdgrid{grid-template-columns:1fr}}
 .bulkbox{margin-top:12px;background:#10131c;border:1px solid #2b3550;border-radius:12px;padding:12px}
 .bulkhead{font-weight:700;font-size:15px}
-.autonote{font-size:12.5px;color:var(--dim);background:#0b0c10;border-radius:10px;padding:10px;margin-top:10px}
+.autonote{font-size:12.5px;color:var(--dim);background:var(--field);border-radius:10px;padding:10px;margin-top:10px}
 .looks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
-.looks button{background:#0b0c10;border:1px solid var(--line);color:var(--dim);border-radius:999px;
+.looks button{background:var(--field);border:1px solid var(--line);color:var(--dim);border-radius:999px;
   padding:7px 12px;font:inherit;font-size:13px;cursor:pointer}
 .looks button.on{border-color:var(--acc);color:var(--text);background:#2a1a22}
 .autonote a{color:var(--acc2)}
@@ -2510,14 +2562,53 @@ dialog#rsdlg::backdrop{background:#000b}
 .capctl{flex:1;min-width:220px}
 .capctl label{font-size:12px;color:var(--dim)}
 .cols{display:flex;gap:10px}.cols>div{flex:1}
-input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-radius:8px;background:#0b0c10;padding:2px}
+input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-radius:8px;background:var(--field);padding:2px}
 .prev{width:162px;height:288px;border-radius:14px;overflow:hidden;position:relative;flex-shrink:0;margin:auto;
   background:linear-gradient(160deg,#3a2f1a,#14161c 45%,#1d2a33);display:flex;justify-content:center;border:1px solid var(--line)}
 .pv{position:absolute;left:8px;right:8px;text-align:center;font-weight:800;line-height:1.15}
 .pvmatch{position:absolute;top:6px;right:6px;font-size:9px;background:#0009;color:#ffb03d;padding:2px 5px;border-radius:5px;display:none}
+
+/* ===== theme: San Jose Sharks (dark, terminal / ASCII) ===== */
+.themepick{width:auto;font-size:12px;padding:5px 8px;border-radius:8px}
+html[data-theme=sharks]{--bg:#030708;--card:#081113;--line:#0f3a3e;--text:#cfeeed;--dim:#5b8587;
+  --acc:#00a3ad;--acc2:#e57200;--acc3:#007f88;--ok:#2fd6a3;--field:#010405}
+html[data-theme=sharks] body{font:14px/1.5 "JetBrains Mono","Fira Code","Cascadia Mono","DejaVu Sans Mono",Consolas,monospace;
+  letter-spacing:.2px}
+html[data-theme=sharks] *{border-radius:0 !important}
+html[data-theme=sharks] button,html[data-theme=sharks] input,html[data-theme=sharks] select,
+html[data-theme=sharks] textarea,html[data-theme=sharks] .go{font-family:inherit !important}
+html[data-theme=sharks] body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,#0000 0 2px,#00a3ad08 2px 3px)}
+html[data-theme=sharks] h1{font-weight:700;letter-spacing:0}
+html[data-theme=sharks] h1 span{background:none;color:var(--acc);-webkit-background-clip:initial;
+  text-shadow:0 0 8px #00a3ad88}
+html[data-theme=sharks] h1 span::before{content:"[ ";color:var(--acc2)}
+html[data-theme=sharks] h1 span::after{content:" ]_";color:var(--acc2);animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+html[data-theme=sharks] .card,html[data-theme=sharks] .job,html[data-theme=sharks] .clip,
+html[data-theme=sharks] .bulkbox,html[data-theme=sharks] .projroot,html[data-theme=sharks] .group,
+html[data-theme=sharks] .hist{border-style:dashed !important;border-color:var(--line) !important}
+html[data-theme=sharks] .bulkbox{background:#04191b !important}
+html[data-theme=sharks] .go,html[data-theme=sharks] #bulkgo{background:var(--acc) !important;color:#001214 !important;
+  text-transform:uppercase;letter-spacing:1px;box-shadow:0 0 0 1px var(--acc),0 0 14px #00a3ad55}
+html[data-theme=sharks] .go::before{content:"> "}
+html[data-theme=sharks] .capbtn,html[data-theme=sharks] .rvkeep{background:var(--acc2) !important;color:#140800 !important}
+html[data-theme=sharks] .tab::before{content:"[ "}html[data-theme=sharks] .tab::after{content:" ]"}
+html[data-theme=sharks] .tab.on{background:var(--acc);color:#001214}
+html[data-theme=sharks] .bar i{background:repeating-linear-gradient(90deg,var(--acc) 0 8px,#0000 8px 10px)}
+html[data-theme=sharks] .seg button.on,html[data-theme=sharks] .looks button.on{background:#06363a !important;color:var(--text)}
+html[data-theme=sharks] .stars{color:var(--acc2)}
+html[data-theme=sharks] .readybar{background:#05282b}
+html[data-theme=sharks] .looks button.on{border-color:var(--acc)}
+html[data-theme=sharks] h2::before{content:"// "}
+html[data-theme=sharks] pre{color:#7fd8d4}
+html[data-theme=sharks] .pt.now{border-color:var(--acc2);color:var(--acc2)}
+html[data-theme=sharks] .pt.timer{border-color:var(--acc);color:var(--acc)}
 </style></head><body>
 <h1>✂️ <span>Clipper</span>
-  <button type="button" class="small" id="updbtn" style="margin-left:auto" title="Get the latest clipper from GitHub">⟳ Update</button>
+  <select id="themepick" class="themepick" title="Theme" style="margin-left:auto">
+    <option value="">Woke as fuck</option><option value="sharks">San Jose Sharks</option></select>
+  <button type="button" class="small" id="updbtn" title="Get the latest clipper from GitHub">⟳ Update</button>
   <button type="button" class="small" id="aibtn">⚙️ AI</button></h1>
 <div id="readybar" class="readybar" style="display:none"><span id="readytxt"></span>
   <button type="button" class="go" id="readygo" style="margin:0;padding:8px 14px;width:auto">🎬 Review now</button>
@@ -3460,6 +3551,9 @@ async function del(p){
   if(!confirm('Delete this clip?'))return;
   await api('/api/delete',{path:p}); loadClips();
 }
+(()=>{const tp=$('#themepick'); tp.value=document.documentElement.dataset.theme||'';
+  tp.onchange=()=>{const v=tp.value; if(v)document.documentElement.dataset.theme=v; else delete document.documentElement.dataset.theme;
+    try{localStorage.setItem('clipper_theme',v)}catch(e){}}})();
 poll(); loadClips(); setInterval(poll,1500);
 // quietly refresh post views when the page opens (at most every 6 hours)
 setTimeout(async()=>{try{const k='clipper_views_at', last=+(localStorage.getItem(k)||0);
