@@ -139,6 +139,18 @@ In 📈 Results, **⟳ Refresh views** reads the views and likes of every logged
 (with yt-dlp). It also does this quietly when the page opens, at most every 6 hours. TikTok works without
 logging in; Instagram usually needs you logged in to Instagram in Firefox – otherwise type those views in.
 
+### Windows
+Open **PowerShell** (Start menu → type *PowerShell*) and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/SNXFFBXXTS/snxffclip/main/windows/install.ps1 | iex
+```
+
+It installs Python, Git, ffmpeg and yt-dlp (with winget), puts clipper in your user folder (`clipper`) and
+adds a **Clipper** shortcut to the desktop – double-click it and the page opens. Keep the black window open
+while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
+again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
+
 ### Logo watermark
 If a campaign needs the brand's logo on every clip, put the logo image (PNG with a transparent background is
 best) in the campaign folder and set *Logo watermark file* (e.g. `logo.png`). It goes just above the video in

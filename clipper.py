@@ -70,6 +70,16 @@ def short_ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+WINDOWS = os.name == "nt"
+
+
+def ff_filter_path(p) -> str:
+    """A file path written inside an ffmpeg filter (subtitles=..., fontsdir=...).
+    Windows paths need / and an escaped drive colon: C\\:/Users/..."""
+    s_ = str(p).replace("\\", "/")
+    return s_.replace(":", "\\:").replace("'", "\\'")
+
+
 def slug(name: str, n=60) -> str:
     return (re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:n].strip("-")) or "clip"
 
@@ -136,7 +146,10 @@ def ff(cmd):
 
 def need(tool):
     if not shutil.which(tool):
-        die(f"'{tool}' not found - install it with: sudo pacman -S {tool}")
+        win = {"ffmpeg": "Gyan.FFmpeg", "ffprobe": "Gyan.FFmpeg", "yt-dlp": "yt-dlp.yt-dlp", "git": "Git.Git"}
+        die(f"'{tool}' not found - install it with: " +
+            (f"winget install {win.get(tool, tool)}  (then open a new window)" if WINDOWS
+             else f"sudo pacman -S {tool}"))
 
 
 def is_url(s: str) -> bool:
@@ -210,9 +223,15 @@ def preload_cuda():
         for mod, pats in (("nvidia.cublas", ["libcublasLt.so.12", "libcublas.so.12"]),
                           ("nvidia.cudnn", ["libcudnn.so.9", "libcudnn_*.so.9"])):
             m = importlib.import_module(mod)
-            libdir = Path(list(m.__path__)[0]) / "lib"
+            base = Path(list(m.__path__)[0])
+            if WINDOWS:                          # Windows: make the DLL folder findable
+                b = base / "bin"
+                if b.is_dir():
+                    os.add_dll_directory(str(b))
+                    os.environ["PATH"] = str(b) + os.pathsep + os.environ.get("PATH", "")
+                continue
             for pat in pats:
-                for f in sorted(glob.glob(str(libdir / pat))):
+                for f in sorted(glob.glob(str(base / "lib" / pat))):
                     ctypes.CDLL(f, mode=ctypes.RTLD_GLOBAL)
         import ctranslate2
         ok = ctranslate2.get_cuda_device_count() > 0
@@ -819,13 +838,50 @@ def list_fonts():
         fams |= {f.split(",")[0].strip() for f in r.stdout.splitlines() if f.strip()}
     except (OSError, subprocess.TimeoutExpired):
         pass
-    if FONTS_DIR.is_dir():
-        for f in FONTS_DIR.iterdir():
-            if f.suffix.lower() in (".ttf", ".otf"):
+    dirs = [FONTS_DIR]
+    if WINDOWS:
+        dirs += [Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts",
+                 Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"]
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.suffix.lower() not in (".ttf", ".otf"):
+                continue
+            fam = None
+            if shutil.which("fc-scan"):
                 r = subprocess.run(["fc-scan", "--format", "%{family}\n", str(f)],
                                    capture_output=True, text=True)
-                fams |= {x.split(",")[0].strip() for x in r.stdout.splitlines() if x.strip()}
+                fam = next((x.split(",")[0].strip() for x in r.stdout.splitlines() if x.strip()), None)
+            fams.add(fam or font_family(f) or f.stem)
+    fams.discard("")
     return sorted(fams, key=str.lower)
+
+
+def font_family(path):
+    """Read the family name from a .ttf/.otf file (no fontconfig needed)."""
+    import struct
+    try:
+        data = Path(path).read_bytes()
+        n = struct.unpack(">H", data[4:6])[0]
+        for i in range(n):
+            tag, _, off, _ = struct.unpack(">4sIII", data[12 + 16 * i: 28 + 16 * i])
+            if tag != b"name":
+                continue
+            _, cnt, so = struct.unpack(">HHH", data[off:off + 6])
+            best = None
+            for j in range(cnt):
+                pid, eid, lid, nid, ln, lo = struct.unpack(">6H", data[off + 6 + 12 * j: off + 18 + 12 * j])
+                if nid not in (1, 16):
+                    continue
+                raw = data[off + so + lo: off + so + lo + ln]
+                txt = raw.decode("utf-16-be", "ignore") if pid in (0, 3) else raw.decode("latin-1", "ignore")
+                if txt and (best is None or nid == 16):
+                    best = txt
+            return best
+    except (OSError, struct.error, IndexError):
+        return None
+    return None
 
 
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
@@ -895,8 +951,8 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
     d = duration_of(raw) or 60
     vfade = f"fade=t=in:d=0.12,fade=t=out:st={max(d - 0.3, 0):.2f}:d=0.3"
     if subs:
-        fd = f":fontsdir='{FONTS_DIR}'" if FONTS_DIR.is_dir() else ""
-        v += f";[v0]subtitles='{subs}'{fd},{vfade}[v]"
+        fd = f":fontsdir='{ff_filter_path(FONTS_DIR)}'" if FONTS_DIR.is_dir() else ""
+        v += f";[v0]subtitles='{ff_filter_path(subs)}'{fd},{vfade}[v]"
     else:
         v += f";[v0]{vfade}[v]"
 
@@ -1714,7 +1770,9 @@ def fetch_post_stats(url):
     if not shutil.which("yt-dlp") or not re.match(r"https?://", url or ""):
         return None
     tries = [[]]
-    if "instagram.com" in url and (Path.home() / ".mozilla" / "firefox").is_dir():
+    ff_dir = (Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox") if WINDOWS \
+        else (Path.home() / ".mozilla" / "firefox")
+    if "instagram.com" in url and ff_dir.is_dir():
         tries.append(["--cookies-from-browser", "firefox"])
     for extra in tries:
         try:
@@ -2452,7 +2510,7 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <button type="button" data-v="claude">Claude (API key)</button></div>
  <div id="ai_ollama" class="cdgrid" style="margin-top:12px"><label class="wide">Ollama model
    <input type="text" id="ai_om" placeholder="e.g. llama3.2"></label>
-   <div class="wide s" style="font-size:12px;color:var(--dim)">Install: <code>sudo pacman -S ollama</code>, <code>sudo systemctl enable --now ollama</code>,
+   <div class="wide s" style="font-size:12px;color:var(--dim)">Install Ollama (Linux: <code>sudo pacman -S ollama</code> + <code>sudo systemctl enable --now ollama</code>; Windows: <code>winget install Ollama.Ollama</code>), then
    <code>ollama pull llama3.2</code></div></div>
  <div id="ai_claude" class="cdgrid" style="margin-top:12px"><label class="wide">API key <span id="ai_haskey" style="color:var(--ok)"></span>
    <input type="text" id="ai_key" placeholder="sk-ant-… (leave empty to keep the saved key)" autocomplete="off"></label>
@@ -3542,7 +3600,8 @@ def serve_ui(args):
     def run_job_inner(job, cmd):
             job["status"], job["stage"] = "running", ("Re-rendering…" if job.get("clip") else "Starting…")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
+                                    **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS
+                                       else {"start_new_session": True}))
             job["proc"] = proc
             buf = b""
             while True:
@@ -3996,6 +4055,9 @@ def serve_ui(args):
                 def restart():
                     time.sleep(0.8)
                     srv.server_close()
+                    if WINDOWS:                      # execv is unreliable on Windows: start a new copy
+                        subprocess.Popen([sys.executable] + sys.argv)
+                        os._exit(0)
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 threading.Thread(target=restart, daemon=True).start()
             elif u.path == "/api/results/refresh":
@@ -4139,8 +4201,12 @@ def serve_ui(args):
                         add_history(job)
                     if job["proc"]:
                         try:
-                            os.killpg(job["proc"].pid, signal.SIGTERM)
-                        except ProcessLookupError:
+                            if WINDOWS:              # stop the job and its ffmpeg children
+                                subprocess.run(["taskkill", "/F", "/T", "/PID", str(job["proc"].pid)],
+                                               capture_output=True)
+                            else:
+                                os.killpg(job["proc"].pid, signal.SIGTERM)
+                        except (ProcessLookupError, OSError):
                             pass
                 self.send_json({"ok": True})
             elif u.path == "/api/clear":
@@ -4177,6 +4243,9 @@ def serve_ui(args):
         if r.returncode == 0 and r.stdout.strip():
             ts = f"  anywhere:    http://{r.stdout.split()[0]}:{args.port}   (phone on Tailscale)\n"
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), H)
+    if getattr(args, "open", False):
+        import webbrowser
+        threading.Timer(1.0, webbrowser.open, [f"http://localhost:{args.port}"]).start()
     print(f"Clipper is running:\n"
           f"  on this PC:  http://localhost:{args.port}\n"
           f"  home Wi-Fi:  http://{ip}:{args.port}\n{ts}"
@@ -4189,10 +4258,14 @@ def serve_ui(args):
 
 
 def main():
+    if WINDOWS and not sys.flags.utf8_mode:      # Windows: run in UTF-8 mode (emoji, captions, briefs)
+        os.environ["PYTHONUTF8"] = "1"
+        sys.exit(subprocess.call([sys.executable, "-X", "utf8"] + sys.argv))
     p = argparse.ArgumentParser(description="Clip YouTube videos into vertical shorts.")
     p.add_argument("source", nargs="?", help="YouTube URL or local video file")
     p.add_argument("--ui", action="store_true", help="start the web interface")
     p.add_argument("--port", type=int, default=8765, help="web interface port (default 8765)")
+    p.add_argument("--open", action="store_true", help="with --ui: open the page in the browser once it's running")
     p.add_argument("--campaign", help="apply a campaign's rules (file name in campaigns/, without .json)")
     p.add_argument("--audio", action="store_true",
                    help="just rip the audio (works with links, playlists and files; -s/-e optional)")
