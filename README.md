@@ -128,6 +128,11 @@ caption not from the approved list, missing @tag or #ad, doesn't mention the cam
 from low-res footage. Each campaign is also checked against its saved brief (music allowed when the brief
 bans it, word-for-word captions off, on-screen text that's just a hashtag, missing tag/disclosure…).
 
+### Logo watermark
+If a campaign needs the brand's logo on every clip, put the logo image (PNG with a transparent background is
+best) in the campaign folder and set *Logo watermark file* (e.g. `logo.png`). It goes just above the video in
+blur mode – clear of captions and on-screen text – or top-right otherwise.
+
 ### Check-by-eye rules
 Some rules can't be checked automatically (children using the product, renders shown as real footage, made-up
 claims…). Clipper lists them from the brief under *Things to check by eye*, and in 🎬 Review you have to tick

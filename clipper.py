@@ -260,7 +260,9 @@ def transcribe(path: Path, model_size: str, cache=True):
         res = []
         for s in segs:
             res.append({"start": s.start, "end": s.end, "text": s.text.strip(),
-                        "words": [(w.start, w.end, w.word.strip()) for w in (s.words or [])]})
+                        "words": [(w.start, w.end, w.word.strip()) for w in (s.words or [])],
+                        "conf": round(float(getattr(s, "avg_logprob", 0) or 0), 3),
+                        "nospeech": round(float(getattr(s, "no_speech_prob", 0) or 0), 3)})
             print(f"\r  {short_ts(s.end)} / {short_ts(info.duration)}", end="", flush=True)
         print()
         return res
@@ -799,7 +801,28 @@ def has_audio(path: Path) -> bool:
     return bool(r.stdout.strip())
 
 
-def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0):
+LOGO_W = 230          # logo width on the 1080-wide frame
+
+
+def logo_xy(raw: Path, mode: str, pos: str):
+    """Where the logo goes: just above the video in blur mode (clear of captions and the
+    on-screen text), otherwise the top-right corner."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=width,height", "-of", "csv=p=0", str(raw)], capture_output=True, text=True)
+    try:
+        rw, rh = (int(x) for x in r.stdout.strip().split(",")[:2])
+    except ValueError:
+        rw, rh = 16, 9
+    top = (H - round(W * rh / rw)) // 2 if mode == "blur" else 0
+    pos = pos or "auto"
+    if pos == "auto":
+        pos = "above-video" if top > 420 else "top-right"
+    return {"above-video": (f"W-w-48", f"{top}-h-28"), "top-right": ("W-w-48", "190"),
+            "top-left": ("48", "190"), "top-center": ("(W-w)/2", "120")}.get(pos, ("W-w-48", "190"))
+
+
+def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0,
+           logo=None, logo_pos="auto"):
     if mode == "crop":      # zoom to fill, cut the sides off
         v = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0]"
     elif mode == "blur":    # whole video in the middle, blurred copy behind
@@ -822,6 +845,12 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
     if not music and has_audio(raw):
         v += f";[0:a]{afade}[a]"
         amap = "[a]"
+    if logo and Path(logo).is_file():
+        li = 2 if music else 1
+        x, y = logo_xy(raw, mode, logo_pos)
+        v = v[: v.rindex("[v]")] + "[vl]" + v[v.rindex("[v]") + 3:]     # final video -> [vl]
+        v += (f";[{li}:v]scale={LOGO_W}:-1,format=rgba[lg];"
+              f"[vl][lg]overlay=x={x}:y={y}:shortest=1[v]")
     if music:
         inputs += ["-stream_loop", "-1", "-ss", f"{music_start:.2f}", "-i", str(music)]
         # music bed: fade in/out, then duck it whenever someone speaks
@@ -832,6 +861,8 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
               f"[m][sp1]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[md];"
               f"[sp2][md]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{afade}[a]")
         amap = "[a]"
+    if logo and Path(logo).is_file():
+        inputs += ["-loop", "1", "-i", str(logo)]
     run(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
          "-filter_complex", v, "-map", "[v]", "-map", amap,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -866,14 +897,16 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
         part = out.with_name(out.name + ".part")
         try:
             render(raw, part, args.mode, subs, music,
-                   getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0))
+                   getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0),
+                   getattr(args, "logo", None), getattr(args, "logo_pos", "auto"))
             os.replace(part, out)
         finally:
             part.unlink(missing_ok=True)
     side = {"source": str(src), "start": start, "end": end, "words": win, "style": style,
             "mode": args.mode, "captions": bool(args.captions),
             "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
-            "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None)}
+            "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None),
+            "logo": getattr(args, "logo", None), "logo_pos": getattr(args, "logo_pos", "auto")}
     old = out.with_suffix(".clip.json")
     if meta is None and old.is_file():              # restyle: keep the original pick info
         try:
@@ -950,6 +983,7 @@ def restyle_mode(args):
     args.music_vol = sd.get("music_vol", 0.15)
     args.music_start = sd.get("music_start", 0.0)
     args.on_screen = sd.get("on_screen")
+    args.logo, args.logo_pos = sd.get("logo"), sd.get("logo_pos", "auto")
     src = sd["source"]
     if not is_url(src) and not Path(src).is_file():
         die(f"the original video isn't there any more: {src}")
@@ -1063,6 +1097,15 @@ def apply_campaign(args, c):
     if "captions" in c:
         args.captions = bool(c["captions"])
     args.on_screen = c.get("on_screen")
+    args.logo, args.logo_pos = None, c.get("logo_pos", "auto")
+    if c.get("logo"):
+        lf = Path(c["logo"]).expanduser()
+        lf = lf if lf.is_absolute() else campaign_dir(c["id"]) / lf
+        if lf.is_file():
+            args.logo = str(lf)
+            print(f"  logo: {lf.name}")
+        else:
+            print(f"  ! logo file not found: {lf} - clips will have NO logo")
 
 
 def ollama_caption(c, text, model):
@@ -1104,7 +1147,7 @@ def make_caption(c, text, n, ollama=None):
 CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
-                   "exact_captions", "checklist", "rate", "manual_checks"]
+                   "exact_captions", "checklist", "rate", "manual_checks", "logo", "logo_pos"]
 
 
 def _clean_line(t):
@@ -1270,6 +1313,9 @@ def parse_brief(text):
     rates += [float(x) for x in re.findall(r"(?:cpm|per 1k views|per 1,000 views)[^$\n]{0,20}\$\s?(\d+(?:\.\d+)?)", raw, re.I)]
     c["rate"] = max(rates) if rates else None
     c["manual_checks"] = manual_checks_from(low)
+    c["logo"] = "logo.png" if re.search(r"logo watermark|add the (official )?.{0,30}logo", low) else ""
+    if c["logo"]:
+        c["manual_checks"].append("The logo is clear and easy to see")
     return c
 
 
@@ -1359,6 +1405,8 @@ def clean_campaign(d):
         out["rate"] = None
     out["checklist"] = lst(d.get("checklist"), 200, 30)
     out["manual_checks"] = lst(d.get("manual_checks"), 200, 10)
+    out["logo"] = s_(d.get("logo"), 200)
+    out["logo_pos"] = d.get("logo_pos") if d.get("logo_pos") in ("auto", "above-video", "top-right", "top-left", "top-center") else "auto"
     return out
 
 
@@ -1636,6 +1684,11 @@ def learn_bonus(learn, meta, dur):
     return bonus, (f"your {' & '.join(notes)} do well" if notes else "")
 
 
+def bf_needs_logo(d: Path):
+    bf = d / "brief.txt"
+    return bf.is_file() and bool(re.search(r"logo watermark|add the (official )?.{0,30}logo", bf.read_text().lower()))
+
+
 def campaign_checks(cid):
     """Does the campaign's setup match its brief? -> list of (level, message)"""
     out = []
@@ -1666,6 +1719,14 @@ def campaign_checks(cid):
                                 "'Things to check by eye' so Review asks you"))
         if b["disclosure"] and not c.get("disclosure") and not c.get("exact_captions"):
             out.append(("warn", "The brief needs a disclosure like #ad"))
+    if c.get("logo"):
+        lf = Path(c["logo"]).expanduser()
+        lf = lf if lf.is_absolute() else d / lf
+        if not lf.is_file():
+            out.append(("error", f"Logo needed but there's no '{c['logo']}' in the campaign folder - "
+                                 f"put the logo image (PNG) there"))
+    elif bf_needs_logo(d):
+        out.append(("warn", "The brief asks for a logo watermark, but no logo is set"))
     vids = [f for f in (d / "source").iterdir() if f.suffix.lower() in VIDEO_EXT] if (d / "source").is_dir() else []
     if not vids:
         out.append(("info", "No footage in this campaign yet"))
@@ -1752,7 +1813,11 @@ def visual_moments(src, lo, hi, target):
 def find_moments(src, args, lo, hi, target):
     """Transcribe (cached), then score every possible clip in one video.
     Videos with (almost) no speech fall back to picking by movement and sound."""
-    segs = [s for s in transcribe(src, args.model) if s["text"]]
+    raw_segs = [s for s in transcribe(src, args.model) if s["text"]]
+    # drop shaky "speech" - sung lyrics, music, noise - so it can't turn into nonsense captions
+    segs = [s for s in raw_segs if s.get("conf", 0) > -1.0 and s.get("nospeech", 0) < 0.6]
+    if len(segs) < len(raw_segs):
+        print(f"  ignored {len(raw_segs) - len(segs)} unclear bit(s) of 'speech' (music/lyrics)")
     words = sum(len(s["text"].split()) for s in segs)
     if words < 12:
         cands = visual_moments(src, lo, hi, target)
@@ -2378,6 +2443,7 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <label>Tag in caption<input type="text" id="cf_mention" placeholder="@brand"></label>
    <label>Disclosure hashtag<input type="text" id="cf_disclosure" placeholder="#Ad"></label>
    <label class="wide">On-screen text (burned into every clip)<input type="text" id="cf_on_screen"></label>
+   <label>Logo watermark file (in the campaign folder)<input type="text" id="cf_logo" placeholder="e.g. logo.png - leave empty for none"></label>
    <label class="wide">Keywords clips should mention (comma separated)<input type="text" id="cf_keywords"></label>
    <label class="wide">Extra hashtags (comma separated, max 3)<input type="text" id="cf_hashtags"></label>
    <label class="wide">Lines every caption must include (one per line)<textarea id="cf_required_lines" rows="2"></textarea></label>
@@ -2692,7 +2758,7 @@ $('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testingâ€
 /* ---------- campaign builder ---------- */
 let cdEditId='';
 const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist','manual_checks'],
-      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate'];
+      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate','logo'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){
   const box=$('#cf_files');
