@@ -1893,11 +1893,15 @@ async function cdFiles(){
   const words=[$('#cf_name').value,$('#cf_keywords').value,$('#cf_agency').value].join(' ').toLowerCase()
      .split(/[^a-z0-9]+/).filter(w=>w.length>=3&&!STOP.has(w));
   if(!list.length){box.innerHTML='<div class="s" style="color:var(--dim);font-size:13px;padding:6px">No videos or zips downloaded in the last 30 days.</div>';return}
+  const now=Date.now()/1000;
+  const ago=t=>{const m=Math.round((now-t)/60);return m<1?'just now':m<60?m+' min ago':m<1440?Math.round(m/60)+' h ago':Math.round(m/1440)+' d ago'};
   box.innerHTML=list.map(f=>{const n=f.name.toLowerCase(), hit=words.filter(w=>n.includes(w));
+    const fresh=now-f.mtime<600;                       // downloaded in the last 10 minutes
     const mb=(f.size/1048576).toFixed(0)+' MB', d=f.zip?'zip':fmtDur(f.dur);
-    return `<label><input type="checkbox" value="${esc(f.path)}" ${hit.length?'checked':''}>
-      <span>${f.zip?'🗜️':'🎬'} ${esc(f.name)} ${hit.length?`<span class="match">matches "${esc(hit[0])}"</span>`:''}</span>
-      <span class="m">${d} · ${mb}</span></label>`}).join('');
+    const tag=fresh?'<span class="match">just downloaded</span>':hit.length?`<span class="match">matches "${esc(hit[0])}"</span>`:'';
+    return `<label><input type="checkbox" value="${esc(f.path)}" ${fresh||hit.length?'checked':''}>
+      <span>${f.zip?'🗜️':'🎬'} ${esc(f.name)} ${tag}</span>
+      <span class="m">${d} · ${mb} · ${ago(f.mtime)}</span></label>`}).join('');
 }
 function cdFill(c){
   TXTF.forEach(k=>$('#cf_'+k).value=c[k]??'');
