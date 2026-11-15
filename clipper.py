@@ -1328,11 +1328,37 @@ def make_caption(c, text, n, ollama=None):
 CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
-                   "exact_captions", "checklist", "rate", "manual_checks", "logo", "logo_pos"]
+                   "exact_captions", "checklist", "rate", "manual_checks", "logo", "logo_pos", "mentions"]
 
 
 def _clean_line(t):
     return re.sub(r"\s+", " ", re.sub(r"^[\s•\-–*✔✅❌⚠️️\d.)]+", "", t)).strip()
+
+
+PLATFORM_ALIASES = {"tiktok": "TikTok", "tik tok": "TikTok", "instagram": "Instagram Reels", "ig": "Instagram Reels",
+                    "reels": "Instagram Reels", "youtube": "YouTube Shorts", "youtube shorts": "YouTube Shorts",
+                    "yt": "YouTube Shorts", "shorts": "YouTube Shorts", "x": "X", "twitter": "X"}
+
+
+def brief_platform_tags(raw):
+    """'TikTok @thearenahq · Instagram @thearena' -> a tag per platform (only if they differ)."""
+    found = {}
+    for m in re.finditer(r"\b(tik ?tok|instagram|ig|reels|youtube(?: shorts)?|yt|shorts|twitter|x)\b\s*[:\-–·(]?\s*(@[\w.]+)",
+                         raw, re.I):
+        plat = PLATFORM_ALIASES.get(m[1].lower())
+        if plat and plat not in found:
+            found[plat] = m[2].rstrip(".")
+    return found if len(set(v.lower() for v in found.values())) > 1 else {}
+
+
+def caption_for(caption, camp, platform):
+    """The campaign's caption with the right @tag for this platform."""
+    tags = (camp or {}).get("mentions") or {}
+    main = (camp or {}).get("mention") or ""
+    want = tags.get(platform)
+    if caption and main and want and want.lower() != main.lower():
+        return re.sub(re.escape(main), want, caption, flags=re.I)
+    return caption
 
 
 def parse_brief(text):
@@ -1397,6 +1423,9 @@ def parse_brief(text):
         m = re.search(r"includes? (@[\w.]+)", raw, re.I)
         c["mention"] = m[1] if m else ""
     c["disclosure"] = "#Ad" if re.search(r"#ad\b|#advertisement|#sponsored|ftc|disclos", low) else ""
+    c["mentions"] = brief_platform_tags(raw)
+    if c["mentions"] and not c["mention"]:
+        c["mention"] = next(iter(c["mentions"].values()))
 
     # required line (e.g. "Use one of these lines:" -> next line)
     req = []
@@ -1587,11 +1616,38 @@ def clean_campaign(d):
     out["checklist"] = lst(d.get("checklist"), 200, 30)
     out["manual_checks"] = lst(d.get("manual_checks"), 200, 10)
     out["logo"] = s_(d.get("logo"), 200)
+    tags = d.get("mentions") if isinstance(d.get("mentions"), dict) else {}
+    out["mentions"] = {p: "@" + s_(v, 40).lstrip("@") for p, v in tags.items()
+                       if p in ("TikTok", "Instagram Reels", "YouTube Shorts", "X") and s_(v, 40).lstrip("@")}
     out["logo_pos"] = d.get("logo_pos") if d.get("logo_pos") in ("auto", "above-video", "top-right", "top-left", "top-center") else "auto"
     return out
 
 
-DOWNLOADS = Path.home() / "Downloads"
+def downloads_dir():
+    """The real Downloads folder - on Windows it's often moved (e.g. into OneDrive or another drive)."""
+    if WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                v, _ = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")
+            p = Path(os.path.expandvars(v))
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    elif shutil.which("xdg-user-dir"):
+        try:
+            r = subprocess.run(["xdg-user-dir", "DOWNLOAD"], capture_output=True, text=True, timeout=5)
+            p = Path(r.stdout.strip())
+            if r.returncode == 0 and p.is_dir() and p != Path.home():
+                return p
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return Path.home() / "Downloads"
+
+
+DOWNLOADS = downloads_dir()
 
 
 _DUR_CACHE = {}
@@ -1731,7 +1787,8 @@ def clip_checks(f: Path, c=None):
             if cap not in [x.strip() for x in c.get("example_captions", [])]:
                 out.append("Caption isn't one of the approved ones")
         else:
-            if c.get("mention") and c["mention"].lower() not in cap.lower():
+            if c.get("mention") and c["mention"].lower() not in cap.lower() and \
+                    not any(t.lower() in cap.lower() for t in (c.get("mentions") or {}).values()):
                 out.append(f"Caption is missing {c['mention']}")
             if c.get("disclosure") and c["disclosure"].lower() not in cap.lower():
                 out.append(f"Caption is missing {c['disclosure']}")
@@ -2464,6 +2521,7 @@ select:disabled{opacity:.45}
 .projroot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
 .projroot code{font-size:12.5px;word-break:break-all}
 .postedb{padding:2px 8px 0;font-size:11px;color:var(--ok)}
+.capsplit{display:flex;gap:5px;margin:7px 8px 0}.capsplit .capbtn{margin:0;width:auto;flex:1;font-size:11px}
 .plats{display:flex;flex-wrap:wrap;gap:5px;padding:7px 8px 0}
 .pt{flex:1 1 auto;min-width:0;border:1px solid var(--line);background:none;color:var(--dim);border-radius:8px;
   font-size:11px;padding:5px 6px;cursor:pointer;line-height:1.25;text-align:center;white-space:nowrap}
@@ -2761,9 +2819,16 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
    <label>Pay per 1,000 views ($)<input type="text" id="cf_rate" placeholder="e.g. 2.50 (best platform)"></label>
    <label>Clip length range<input type="text" id="cf_len" placeholder="20-60"></label>
    <label>Tag in caption<input type="text" id="cf_mention" placeholder="@brand"></label>
+   <div class="wide s" style="font-size:12px;color:var(--dim);margin-top:2px">Different tag on some apps? (leave empty = same tag everywhere)</div>
+   <label>TikTok tag<input type="text" class="cf_tag" data-p="TikTok" placeholder="same"></label>
+   <label>Instagram tag<input type="text" class="cf_tag" data-p="Instagram Reels" placeholder="same"></label>
+   <label>YouTube tag<input type="text" class="cf_tag" data-p="YouTube Shorts" placeholder="same"></label>
+   <label>X tag<input type="text" class="cf_tag" data-p="X" placeholder="same"></label>
    <label>Disclosure hashtag<input type="text" id="cf_disclosure" placeholder="#Ad"></label>
    <label class="wide">On-screen text (burned into every clip)<input type="text" id="cf_on_screen"></label>
    <label>Logo watermark file (in the campaign folder)<input type="text" id="cf_logo" placeholder="e.g. logo.png - leave empty for none"></label>
+   <label>…or choose a logo image<input type="file" id="cf_logofile" accept="image/png,image/jpeg,image/webp">
+     <span id="cf_logomsg" class="s" style="font-size:11.5px;color:var(--ok)"></span></label>
    <label class="wide">Keywords clips should mention (comma separated)<input type="text" id="cf_keywords"></label>
    <label class="wide">Extra hashtags (comma separated, max 3)<input type="text" id="cf_hashtags"></label>
    <label class="wide">Lines every caption must include (one per line)<textarea id="cf_required_lines" rows="2"></textarea></label>
@@ -3116,11 +3181,14 @@ async function cdFiles(){
       <span>${f.zip?'🗜️':'🎬'} ${esc(f.name)} ${tag}</span>
       <span class="m">${d} · ${mb} · ${ago(f.mtime)}</span></label>`}).join('');
 }
+let cdLogo=null;
 function cdFill(c){
   TXTF.forEach(k=>$('#cf_'+k).value=c[k]??'');
   LISTF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join(', '));
   LINEF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join('\n'));
   $('#cf_music').checked=!!c.music; $('#cf_exact').checked=!!c.exact_captions;
+  document.querySelectorAll('.cf_tag').forEach(i=>i.value=(c.mentions||{})[i.dataset.p]||'');
+  cdLogo=null; $('#cf_logofile').value=''; $('#cf_logomsg').textContent='';
   document.querySelectorAll('#cf_platforms input').forEach(i=>i.checked=(c.platforms||[]).includes(i.value));
   $('#cdstep1').style.display='none'; $('#cdstep2').style.display='';
   cdFiles();
@@ -3129,6 +3197,7 @@ function cdRead(){
   const c={music:$('#cf_music').checked,exact_captions:$('#cf_exact').checked,captions:true,mode:'blur',
     platforms:[...document.querySelectorAll('#cf_platforms input:checked')].map(i=>i.value)};
   TXTF.forEach(k=>c[k]=$('#cf_'+k).value.trim());
+  c.mentions={}; document.querySelectorAll('.cf_tag').forEach(i=>{if(i.value.trim())c.mentions[i.dataset.p]=i.value.trim()});
   LISTF.forEach(k=>c[k]=$('#cf_'+k).value.split(',').map(x=>x.trim()).filter(Boolean));
   LINEF.forEach(k=>c[k]=$('#cf_'+k).value.split('\n').map(x=>x.trim()).filter(Boolean));
   return c;
@@ -3153,7 +3222,7 @@ async function cdPublish(andClip){
   const files=[...document.querySelectorAll('#cf_files input:checked')].map(i=>i.value);
   const b=andClip?$('#cdgo'):$('#cdsave'), old=b.textContent; b.disabled=true;
   b.textContent=files.length?`Moving ${files.length} file(s)…`:'Saving…';
-  const r=await api('/api/savecampaign',{campaign:cdRead(),id:cdEditId,brief:cdEditId?'':$('#cdbrief').value,files});
+  const r=await api('/api/savecampaign',{campaign:cdRead(),id:cdEditId,brief:cdEditId?'':$('#cdbrief').value,files,logo:cdLogo});
   b.disabled=false; b.textContent=old;
   if(r.error){alert(r.error);return}
   $('#cdlg').close(); await loadCamps(); $('#camp').value=r.id; $('#camp').onchange({target:$('#camp')});
@@ -3166,6 +3235,10 @@ async function cdPublish(andClip){
     poll(); window.scrollTo({top:document.querySelector('#jobs').offsetTop-20,behavior:'smooth'});
   }
 }
+$('#cf_logofile').onchange=e=>{const f=e.target.files[0]; cdLogo=null; $('#cf_logomsg').textContent='';
+  if(!f)return; if(f.size>8e6){alert('That image is too big (max 8 MB)');e.target.value='';return}
+  const rd=new FileReader(); rd.onload=()=>{cdLogo={name:f.name,data:rd.result}; $('#cf_logo').value='logo.png';
+    $('#cf_logomsg').textContent='✓ '+f.name+' will be saved as logo.png'}; rd.readAsDataURL(f)};
 $('#cdsave').onclick=()=>cdPublish(false);
 $('#cdgo').onclick=()=>cdPublish(true);
 function copyText(t,btn){
@@ -3253,7 +3326,7 @@ async function loadClips(){
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
         ${platRow(c)}
         ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
-        ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
+        ${capButtons(c)}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
@@ -3492,9 +3565,24 @@ function buildPlan(){
   plRows.forEach((r,i)=>{const dn=dayName(r.t); if(dn!==lastDay){html+=`<div class="plday">${dn}</div>`;lastDay=dn}
     html+=`<div class="plrow" id="plr${i}"><span class="tm">${r.t.toTimeString().slice(0,5)}</span><span class="pf">${PL_SHORT[r.p]}</span>
       <img src="/thumb/${enc(r.c.path)}?v=${r.c.v}"><span class="nm" title="${esc(r.c.name)}">${starStr(r.c.stars)} ${esc(r.c.name)}</span>
-      ${r.c.caption?`<button class="small" onclick="copyText(capStore[plRows[${i}].c.path],this)">Caption</button>`:''}
+      ${r.c.caption?`<button class="small" onclick="copyText(capFor(plRows[${i}].c.path,plRows[${i}].p),this)">Caption</button>`:''}
       <button class="small" onclick="plPosted(${i})">✓ Posted</button></div>`});
   $('#pllist').innerHTML=html||'<div class="empty">Nothing left to post from this batch 🎉</div>';
+}
+function campOf(path){const key=path.split('/')[0]; return camps[key.replace(/~/g,'/')]||{}}
+function capFor(path,plat){
+  let t=capStore[path]||''; const camp=campOf(path), tags=camp.mentions||{}, main=camp.mention||'', want=tags[plat];
+  if(t&&main&&want&&want.toLowerCase()!==main.toLowerCase()) t=t.split(new RegExp(main.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi')).join(want);
+  return t;
+}
+function capButtons(c){
+  if(!c.caption) return '';
+  const camp=campOf(c.path), tags=camp.mentions||{}, q=esc(c.path).replace(/'/g,"\\'");
+  const plats=(camp.platforms||[]).filter(p=>tags[p]&&tags[p].toLowerCase()!==(camp.mention||'').toLowerCase());
+  if(!Object.keys(tags).length||!(camp.platforms||[]).length)
+    return `<button class="capbtn" onclick="copyText(capStore['${q}'],this)">Copy caption</button>`;
+  return `<div class="capsplit">${(camp.platforms||[]).map(p=>`<button class="capbtn" title="Caption with the ${esc(PL_SHORT[p]||p)} tag"
+    onclick="copyText(capFor('${q}','${p}'),this)">Copy · ${esc(PL_SHORT[p]||p)}</button>`).join('')}</div>`;
 }
 /* ---------- platform chips under each clip: when to post, then a timer to submit the link ---------- */
 const SUBMIT_MIN=30;
@@ -4181,7 +4269,8 @@ def serve_ui(args):
                     c = json.loads((campaign_dir(cid) / "campaign.json").read_text())
                     out.append({"id": cid, "name": name, "agency": agency,
                                 "music": c.get("music", True), "on_screen": c.get("on_screen"),
-                                "platforms": c.get("platforms") or [], "rate": c.get("rate")})
+                                "platforms": c.get("platforms") or [], "rate": c.get("rate"),
+                                "mention": c.get("mention") or "", "mentions": c.get("mentions") or {}})
                 self.send_json(out)
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
@@ -4493,6 +4582,27 @@ def serve_ui(args):
                 if cid and cid not in [x for x, _, _ in list_campaigns()]:
                     cid = ""
                 new_id = save_campaign(c, str(d.get("brief") or "")[:20000] or None, cid or None)
+                lg = d.get("logo") if isinstance(d.get("logo"), dict) else None
+                if lg and str(lg.get("data", "")).startswith("data:image/"):
+                    import base64
+                    try:
+                        head, b64 = str(lg["data"]).split(",", 1)
+                        ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "webp": ".webp"}.get(
+                            head.split("/")[1].split(";")[0], ".png")
+                        cdir = campaign_dir(new_id)
+                        tmp_logo = cdir / ("logo-upload" + ext)
+                        tmp_logo.write_bytes(base64.b64decode(b64)[:12_000_000])
+                        if ext == ".png":
+                            tmp_logo.replace(cdir / "logo.png")
+                        else:                          # turn jpg/webp into png
+                            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(tmp_logo),
+                                            str(cdir / "logo.png")], capture_output=True)
+                            tmp_logo.unlink(missing_ok=True)
+                        if (cdir / "logo.png").is_file():
+                            c["logo"] = "logo.png"
+                            save_campaign(c, None, new_id)
+                    except (ValueError, OSError):
+                        pass
                 files = [str(x) for x in (d.get("files") or []) if isinstance(x, str)][:200]
                 moved = import_downloads(new_id, files) if files else []
                 self.send_json({"id": new_id, "moved": moved})

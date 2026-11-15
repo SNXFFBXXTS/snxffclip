@@ -93,6 +93,12 @@ Pick whichever way suits you:
    required tags, deadlines, audience rules, pay), move the footage in from Downloads, check it and clip
    it. Then you just press 🎬 **Review**. Needs a Claude subscription (not an API key).
 
+Good to know: if a brief wants **different tags on different apps** (e.g. `@thearenahq` on TikTok but
+`@thearena` on Instagram) the reader fills in the per-app tag boxes, and each clip gets a *Copy · TikTok* /
+*Copy · Instagram* button with the right tag. If the brief needs a **logo watermark**, use *choose a logo
+image* in the campaign editor – it's saved into the campaign as `logo.png`. Clipper finds your real
+Downloads folder, even when Windows has moved it into OneDrive.
+
 After that it's the same for everyone: 🔎 **Scrape the whole folder** → 🎬 **Review** (keep/drop) →
 post using **Copy caption** and the platform buttons under each clip → submit the link on Whop within
 the time the brief gives.
