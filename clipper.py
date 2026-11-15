@@ -165,8 +165,11 @@ def transcribe(path: Path, model_size: str, cache=True):
     audio = load_audio(path)
 
     def attempt(device):
-        model = WhisperModel(model_size, device=device, compute_type="int8")
-        segs, info = model.transcribe(audio, word_timestamps=True, vad_filter=True)
+        import os
+        model = WhisperModel(model_size, device=device, compute_type="int8",
+                             cpu_threads=os.cpu_count() or 4)
+        segs, info = model.transcribe(audio, word_timestamps=True, vad_filter=True,
+                                      language="en" if model_size.endswith(".en") else None)
         res = []
         for s in segs:
             res.append({"start": s.start, "end": s.end, "text": s.text.strip(),
@@ -876,18 +879,8 @@ def write_campaign_files(c, folder, picks, ollama=None):
 # ======================================================================
 # modes
 # ======================================================================
-def auto_mode(args):
-    lo, hi = (float(x) for x in args.len.split("-"))
-    target = args.target or (lo + hi) / 2
-    if is_url(args.source):
-        src, title = download_full(args.source)
-    else:
-        src = Path(args.source).expanduser()
-        if not src.exists():
-            die(f"file not found: {src}")
-        title = src.stem
-
-    print("> analysing")
+def find_moments(src, args, lo, hi, target):
+    """Transcribe (cached), then score every possible clip in one video."""
     segs = [s for s in transcribe(src, args.model) if s["text"]]
     if not segs:
         die("no speech found in this video")
@@ -907,6 +900,22 @@ def auto_mode(args):
             hits += bool(n)
         cands.sort(key=lambda c: c["score"], reverse=True)
         print(f"  {hits} possible clips mention: {', '.join(kws)}")
+    return segs, cands
+
+
+def auto_mode(args):
+    lo, hi = (float(x) for x in args.len.split("-"))
+    target = args.target or (lo + hi) / 2
+    if is_url(args.source):
+        src, title = download_full(args.source)
+    else:
+        src = Path(args.source).expanduser()
+        if not src.exists():
+            die(f"file not found: {src}")
+        title = src.stem
+
+    print("> analysing")
+    segs, cands = find_moments(src, args, lo, hi, target)
 
     k = args.k
     if not k:                                  # auto: about one clip per 2.5 minutes
@@ -976,6 +985,81 @@ def audio_mode(args):
                  "m4a": ["-c:a", "aac", "-b:a", "256k"]}[args.audio_format]
         run(cmd + ["-i", str(f), "-vn", *codec, str(out)])
     print(f"\ndone - audio saved in {out_dir}")
+
+
+def bulk_mode(args):
+    """Scan EVERY video in a folder and keep the best clips overall."""
+    import math
+    import time as _t
+    c = getattr(args, "campaign_data", None)
+    if args.source:
+        folder = Path(args.source).expanduser()
+        if not folder.is_dir():
+            die(f"--bulk needs a folder: {folder}")
+    elif c:
+        folder = campaign_dir(c["id"]) / "source"
+    else:
+        die("--bulk needs a campaign (--campaign NAME) or a folder of videos")
+    vids = sorted(f for f in folder.iterdir() if f.suffix.lower() in VIDEO_EXT)
+    if c and folder.resolve() != (campaign_dir(c["id"]) / "source").resolve():
+        vids = [Path(file_into_campaign(str(v), c)) for v in vids]
+    if not vids:
+        die(f"no videos in {folder}")
+    lo, hi = (float(x) for x in args.len.split("-"))
+    target = args.target or (lo + hi) / 2
+    print(f"> bulk scrape: {len(vids)} videos")
+    pool, words_of, speech = [], {}, 0.0
+    for i, v in enumerate(vids, 1):
+        print(f"\n=== scan {i}/{len(vids)}: {v.name} ===")
+        try:
+            segs, cands = find_moments(v, args, lo, hi, target)
+        except SystemExit:
+            print(f"  ! nothing usable in {v.name}")
+            continue
+        speech += segs[-1]["end"] - segs[0]["start"]
+        words_of[str(v)] = [w for s in segs for w in s["words"]]
+        for cd in cands:
+            cd["src"], cd["vid"] = str(v), v.stem
+            if not cd.get("title"):
+                cd["title"] = " ".join(segs[cd["i"]]["text"].split()[:6])
+        pool += cands
+    if not pool:
+        die("no usable moments found in any video")
+    k = args.k or max(3, min(30, round(speech / 150)))
+    cap = max(2, math.ceil(k * 0.4))           # keep some variety between videos
+    pool.sort(key=lambda x: x["score"], reverse=True)
+    picks, per = [], {}
+    for cd in pool:
+        if per.get(cd["src"], 0) >= cap:
+            continue
+        if any(d["src"] == cd["src"] and not (cd["end"] + 5 <= d["start"] or cd["start"] >= d["end"] + 5)
+               for d in picks):
+            continue
+        picks.append(cd)
+        per[cd["src"]] = per.get(cd["src"], 0) + 1
+        if len(picks) == k:
+            break
+    out = args.out_dir / f"bulk-scrape-{_t.strftime('%d%b-%H%M')}"
+    out.mkdir(parents=True, exist_ok=True)
+    lines = [f"# bulk scrape of {folder}", "# best clips across all videos", ""]
+    print(f"\n> top {len(picks)} moments:")
+    for n, cd in enumerate(picks, 1):
+        cd["name"] = f"{n:02d}-{slug(cd['vid'], 18)}-{slug(cd['title'], 28)}"
+        prev = cd["text"][:100] + ("..." if len(cd["text"]) > 100 else "")
+        print(f"  {n}. [{cd['vid'][:30]}] {short_ts(cd['start'])}-{short_ts(cd['end'])}  {cd['title']}")
+        lines += [f"# {cd['title']}  (score {cd['score']:.2f})  from {cd['vid']}", f"# \"{prev}\"",
+                  f"# source: {cd['src']}", f"{short_ts(cd['start'])} {short_ts(cd['end'])} {cd['name']}", ""]
+    (out / "clips.txt").write_text("\n".join(lines))
+    if c:
+        write_campaign_files(c, out, picks, args.ollama)
+    used = ", ".join(f"{Path(s).stem[:25]} ×{n}" for s, n in per.items())
+    print(f"  clips per video: {used}")
+    if args.dry_run:
+        return
+    print("\n=== rendering ===")
+    for cd in picks:
+        make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]])
+    print(f"\ndone - {len(picks)} clips in {out}")
 
 
 def batch_mode(args):
@@ -1098,6 +1182,8 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.bulkbox{margin-top:12px;background:#10131c;border:1px solid #2b3550;border-radius:12px;padding:12px}
+.bulkhead{font-weight:700;font-size:15px}
 .autonote{font-size:12.5px;color:var(--dim);background:#0b0c10;border-radius:10px;padding:10px;margin-top:10px}
 .looks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .looks button{background:#0b0c10;border:1px solid var(--line);color:var(--dim);border-radius:999px;
@@ -1145,9 +1231,16 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
     <div id="campnote" class="s" style="color:var(--acc2);font-size:12px;margin-top:5px"></div>
     <div id="srcbox" style="display:none;margin-top:10px"><label style="font-size:12px;color:var(--dim)">Footage</label>
       <select id="src" style="margin-top:5px"></select>
-      <button type="button" class="go" id="batchgo" style="display:none;margin-top:10px;padding:12px;
-        background:linear-gradient(90deg,#3d7bff,#7a3dff)"></button>
-      <div class="s" id="batchnote" style="font-size:12px;color:var(--dim);margin-top:6px"></div></div></div>
+      <div id="bulkbox" class="bulkbox" style="display:none">
+        <div class="bulkhead">🔎 Bulk folder scrape</div>
+        <div class="s" id="bulkinfo" style="font-size:12.5px;color:var(--dim);margin:4px 0 8px"></div>
+        <label style="font-size:12px;color:var(--dim)">Best clips overall: <b id="bulkkv">Auto</b></label>
+        <input type="range" id="bulkk" min="0" max="30" value="0">
+        <button type="button" class="go" id="bulkgo" style="margin-top:10px;padding:12px;
+          background:linear-gradient(90deg,#3d7bff,#7a3dff)">🔎 Scrape the whole folder</button>
+        <div style="margin-top:8px"><button type="button" class="small" id="batchgo" style="display:none"></button></div>
+        <div class="s" id="batchnote" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
+      </div></div></div>
   <div class="row">
     <div class="field"><label>Clips: <b id="kv">5</b></label>
       <input type="range" id="k" min="1" max="15" value="5"></div>
@@ -1165,9 +1258,9 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
         <button type="button" data-v="none">Original</button></div></div>
     <div class="field"><label>Transcription</label>
       <div class="seg" data-name="model">
-        <button type="button" data-v="base">Fast</button>
-        <button type="button" data-v="small" class="on">Good</button>
-        <button type="button" data-v="medium">Best</button></div></div>
+        <button type="button" data-v="base.en">Fast</button>
+        <button type="button" data-v="small.en" class="on">Good</button>
+        <button type="button" data-v="medium.en">Best</button></div></div>
   </div>
   <label class="toggle"><input type="checkbox" id="caps" checked> Burn in captions</label>
   <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">✨ Auto</b></summary>
@@ -1237,7 +1330,7 @@ async function api(p,body){
   const r=await fetch(p,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
   return r.json();
 }
-const opt={len:'20-60',mode:'blur',model:'small'};
+const opt={len:'20-60',mode:'blur',model:'small.en'};
 document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
   seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -1379,17 +1472,35 @@ async function loadSources(){
   if(!cid){$('#srcbox').style.display='none';return}
   const r=await api('/api/sources?campaign='+encodeURIComponent(cid));
   let h='<option value="">— pick a video, or paste a path/link above —</option>';
+  const len=p=>r.dur&&r.dur[p]?' · '+fmtDur(r.dur[p]):'';
   if(r.source.length) h+='<optgroup label="Already in this campaign">'+
-    r.source.map(p=>`<option value="${esc(p)}">${esc(base(p))}</option>`).join('')+'</optgroup>';
+    r.source.map(p=>`<option value="${esc(p)}">${esc(base(p))}${len(p)}</option>`).join('')+'</optgroup>';
   if(r.downloads.length) h+='<optgroup label="New in Downloads (will be moved in)">'+
-    r.downloads.map(p=>`<option value="${esc(p)}">📥 ${esc(base(p))}</option>`).join('')+'</optgroup>';
+    r.downloads.map(p=>`<option value="${esc(p)}">📥 ${esc(base(p))}${len(p)}</option>`).join('')+'</optgroup>';
   $('#src').innerHTML=h; $('#srcbox').style.display='';
+  const tot=r.source.reduce((a,p)=>a+((r.dur||{})[p]||0),0);
+  $('#bulkbox').style.display=r.source.length?'':'none';
+  $('#bulkinfo').innerHTML=`${r.source.length} video${r.source.length>1?'s':''} · ${fmtDur(tot)} total in ${esc(r.folder)}.<br>`+
+    (r.unscanned?`${r.unscanned} not scanned yet - the first scan of ~${fmtDur(r.unscanned_dur)} of footage takes a while. Re-scrapes are quick.`
+                :`All scanned - a re-scrape only takes a moment.`);
   const b=$('#batchgo');
-  if(r.pending){b.style.display='';b.textContent=`⚡ Clip ALL new footage (${r.pending} video${r.pending>1?'s':''})`;}
+  if(r.pending){b.style.display='';b.textContent=`or clip each new video separately (${r.pending})`;}
   else b.style.display='none';
-  $('#batchnote').textContent=r.pending?`Clips every video in ${r.folder} that hasn't been done yet. The number of clips per video depends on its length.`
-    :`Tip: put all the campaign's videos in ${r.folder} to clip them in one go.`;
+  $('#batchnote').textContent=r.source.length?'':`Put the campaign's videos in ${r.folder} to scrape them all at once.`;
 }
+function fmtDur(s){s=Math.round(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}:${String(x).padStart(2,'0')}`}
+$('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'Auto';
+$('#bulkgo').onclick=async()=>{
+  const b=$('#bulkgo'); b.disabled=true;
+  const r=await api('/api/jobs',{bulk:true,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
+    captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
+    music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+  b.disabled=false;
+  if(r.error){alert(r.error);return}
+  poll(); window.scrollTo({top:document.querySelector('#jobs').offsetTop-20,behavior:'smooth'});
+};
 $('#batchgo').onclick=async()=>{
   const b=$('#batchgo'); b.disabled=true;
   const r=await api('/api/jobs',{batch:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,
@@ -1544,6 +1655,11 @@ def serve_ui(args):
     # ---------- job runner ----------
     def P(job, v):
         """map a single-video progress value onto the whole batch"""
+        if job.get("render"):
+            return 60 + max(0, v - 62) / 38 * 40
+        if job.get("scan"):
+            i, n = job["scan"]
+            return ((i - 1) + min(v, 62) / 62) / n * 60
         if job.get("bi"):
             i, n = job["bi"]
             return ((i - 1) + v / 100) / n * 100
@@ -1551,6 +1667,17 @@ def serve_ui(args):
 
     def parse_line(job, line):
         line = line.rstrip()
+        if m := re.match(r"=== scan (\d+)/(\d+): (.*) ===", line):
+            job["scan"] = (int(m[1]), int(m[2]))
+            job["title"] = f"Bulk scrape · scanning {m[1]} of {m[2]}: {m[3]}"
+            job["progress"] = P(job, 0)
+            job["log"].append(line)
+            return
+        if line.startswith("=== rendering ==="):
+            job["render"], job["mv"] = True, 0
+            job["title"] = "Bulk scrape · making the best clips"
+            job["log"].append(line)
+            return
         if m := re.match(r"=== video (\d+)/(\d+): (.*) ===", line):
             job["bi"] = (int(m[1]), int(m[2]))
             job["title"] = f"{m[3]}  ({m[1]} of {m[2]})"
@@ -1614,7 +1741,11 @@ def serve_ui(args):
                     cmd.append("--match-colors")
                 run_job(job, cmd)
                 continue
-            if p.get("batch"):
+            if p.get("bulk"):
+                cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--bulk", "-k", str(p["k"]),
+                       "--len", p["len"], "-m", p["mode"], "--model", p["model"]]
+                job["k"] = 1
+            elif p.get("batch"):
                 cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--batch",
                        "--len", p["len"], "-m", p["mode"], "--model", p["model"]]
                 job["k"] = 1
@@ -1710,6 +1841,25 @@ def serve_ui(args):
             out.append({"name": name, "clips": clips, "mtime": max(c["mtime"] for c in clips)})
         return sorted(out, key=lambda g: g["mtime"], reverse=True)
 
+    _lens = {}
+
+    def video_len(f):
+        try:
+            key = (f, Path(f).stat().st_mtime)
+        except OSError:
+            return 0
+        if key not in _lens:
+            _lens[key] = duration_of(Path(f))
+        return _lens[key]
+
+    def transcript_cached(f: Path):
+        st = f.stat()
+        for m in ("small.en", "base.en", "medium.en", "small", "base", "medium", "tiny", "tiny.en"):
+            key = hashlib.md5(f"{f.resolve()}|{st.st_size}|{st.st_mtime}|{m}".encode()).hexdigest()
+            if (CACHE / f"{key}.json").exists():
+                return True
+        return False
+
     def sources(cid):
         src = []
         if cid in [c for c, _, _ in list_campaigns()]:
@@ -1730,7 +1880,10 @@ def serve_ui(args):
                           if not any((cl / slug(Path(f).stem, 50)).glob("*.mp4")))
         if cid:
             folder = str(campaign_dir(cid) / "source").replace(str(Path.home()), "~")
-        return {"source": src, "downloads": dl, "pending": pending, "folder": folder}
+        dur = {f: video_len(f) for f in src + dl}
+        unscanned = [f for f in src if not transcript_cached(Path(f))]
+        return {"source": src, "downloads": dl, "pending": pending, "folder": folder, "dur": dur,
+                "unscanned": len(unscanned), "unscanned_dur": sum(dur.get(f, 0) for f in unscanned)}
 
     def thumb_for(f: Path):
         st = f.stat()
@@ -1859,7 +2012,8 @@ def serve_ui(args):
             u, d = urlparse(self.path), self.body()
             if u.path == "/api/jobs":
                 url = str(d.get("url", "")).strip()
-                batch = bool(d.get("batch"))
+                bulk = bool(d.get("bulk"))
+                batch = bool(d.get("batch")) or bulk
                 if batch and not d.get("campaign"):
                     return self.send_json({"error": "Pick a campaign first"}, 400)
                 if not url and not batch:
@@ -1884,11 +2038,13 @@ def serve_ui(args):
                     music_vol = 0.15
                 params = {
                     "url": url,
-                    "k": 0 if batch else max(1, min(20, int(d.get("k") or 5))),
-                    "batch": batch,
+                    "k": (max(0, min(30, int(d.get("k") or 0))) if bulk else 0) if batch
+                         else max(1, min(20, int(d.get("k") or 5))),
+                    "batch": batch, "bulk": bulk,
                     "len": d.get("len") if d.get("len") in ("15-30", "20-60", "45-90") else "20-60",
                     "mode": d.get("mode") if d.get("mode") in ("blur", "crop", "none") else "blur",
-                    "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium") else "small",
+                    "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium", "tiny.en",
+                                                              "base.en", "small.en", "medium.en") else "small.en",
                     "captions": bool(d.get("captions", True)),
                     "music": music, "music_vol": music_vol, "campaign": camp,
                     "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "auto",
@@ -1899,7 +2055,7 @@ def serve_ui(args):
                 }
                 jid = uuid.uuid4().hex[:8]
                 job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
-                       "progress": 0, "title": "Clipping all footage" if batch else ("" if is_url(url) else Path(url).name), "error": "", "made": 0, "k": params["k"],
+                       "progress": 0, "title": ("Bulk folder scrape" if bulk else "Clipping all footage") if batch else ("" if is_url(url) else Path(url).name), "error": "", "made": 0, "k": params["k"],
                        "log": deque(maxlen=300), "proc": None}
                 with lock:
                     jobs[jid] = job
@@ -2007,6 +2163,8 @@ def main():
     p.add_argument("--batch", action="store_true",
                    help="clip every video in a campaign's source folder (or in the folder you give)")
     p.add_argument("--redo", action="store_true", help="batch: also redo videos that already have clips")
+    p.add_argument("--bulk", action="store_true",
+                   help="bulk folder scrape: scan every video, keep the best clips overall")
     p.add_argument("--len", default="20-60", help="auto: clip length range in seconds (default 20-60)")
     p.add_argument("--target", type=float, help="auto: preferred clip length (default: middle of --len)")
     p.add_argument("--ollama", metavar="MODEL", help="auto: use a local ollama model to pick + title")
@@ -2068,11 +2226,11 @@ def main():
         args.out_dir = args.out_dir or OUT_DIR
         args.out_dir.mkdir(parents=True, exist_ok=True)
         return serve_ui(args)
-    if not args.source and not args.batch:
+    if not args.source and not args.batch and not args.bulk:
         die("give a YouTube link or file (or use --ui, --batch or --fonts)")
     if args.audio:
         return audio_mode(args)
-    if args.batch:
+    if args.batch or args.bulk:
         args.auto = True
         if args.k is None:
             args.k = 0                         # decide per video
@@ -2086,7 +2244,9 @@ def main():
         apply_campaign(args, args.campaign_data)
     args.out_dir = args.out_dir or OUT_DIR
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    if args.batch:
+    if args.bulk:
+        bulk_mode(args)
+    elif args.batch:
         batch_mode(args)
     elif args.auto:
         auto_mode(args)

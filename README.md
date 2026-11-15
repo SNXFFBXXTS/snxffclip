@@ -77,7 +77,16 @@ Useful options: `-m crop` (zoom instead of blur), `--model base` (faster transcr
 `--music background-songs` (random song per clip), `--ollama llama3.1` (smarter picks, see below).
 
 Clips go to `~/Clips/<video name>/` – or to the campaign's folder when you use a campaign.
-**Whole folder at once:** put a campaign's videos in its `source/` folder and press **⚡ Clip ALL new footage**
+**🔎 Bulk folder scrape:** scans *every* video in a campaign's `source/` folder, ranks all the moments
+against each other and makes the best N clips overall (`./clipper.py --bulk --campaign my-campaign -k 12`,
+or `-k 0` / *Auto* to decide from the amount of footage). Transcripts are saved, so after the first scan
+re-scraping the same folder is quick.
+
+**Speed:** the web page's Fast / Good / Best use English-only speech models (`base.en`, `small.en`,
+`medium.en`) which are faster and more accurate for English. All CPU cores are used. An NVIDIA card with
+CUDA set up is several times faster again.
+
+**Each video separately:** put a campaign's videos in its `source/` folder and press **⚡ Clip ALL new footage**
 in the web page (or run `./clipper.py --batch --campaign my-campaign`). Every video that hasn't been clipped yet
 gets done, with the number of clips based on its length (about one per 2½ minutes, 2–10).
 `./clipper.py ~/Downloads/some-folder --batch --campaign my-campaign` moves a folder of videos into the campaign first.
