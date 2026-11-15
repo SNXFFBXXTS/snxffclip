@@ -146,6 +146,9 @@ def load_audio(path: Path, sr=16000):
 
 def transcribe(path: Path, model_size: str, cache=True):
     """-> list of {start,end,text,words:[(s,e,w)]}"""
+    if not has_audio(path):
+        print("  (no sound track)")
+        return []
     key = None
     if cache:
         st = path.stat()
@@ -1198,11 +1201,72 @@ def write_campaign_files(c, folder, picks, ollama=None):
 # ======================================================================
 # modes
 # ======================================================================
+def motion_curve(path: Path):
+    """How much the picture changes every HOP seconds (0..1), plus scene-cut times."""
+    import numpy as np
+    fps = 1 / HOP
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vf",
+                        f"fps={fps:g},scale=64:36,format=gray", "-f", "rawvideo", "-"],
+                       capture_output=True)
+    a = np.frombuffer(r.stdout, dtype=np.uint8)
+    n = a.size // (64 * 36)
+    if n < 2:
+        return np.zeros(1), []
+    f = a[: n * 64 * 36].reshape(n, 36, 64).astype(float)
+    diff = np.concatenate([[0.0], np.abs(np.diff(f, axis=0)).mean(axis=(1, 2)) / 255])
+    thr = diff.mean() + 2.5 * diff.std()
+    cuts = [i * HOP for i in range(1, n) if diff[i] > max(thr, 0.08)]
+    return diff, cuts
+
+
+def visual_moments(src, lo, hi, target):
+    """No speech: pick clips from movement + sound instead of words."""
+    import numpy as np
+    dur = duration_of(src)
+    if dur < max(3.0, lo - 1):                 # shorter than the campaign allows
+        return []
+    motion, cuts = motion_curve(src)
+    loud = loudness_curve(src)
+    n = len(motion)
+    lz = np.zeros(n)
+    m = min(n, len(loud))
+    lz[:m] = np.clip(loud[:m], -2, 3) / 3
+    act = motion / (motion.mean() + 1e-6) * 0.7 + lz * 0.3      # activity per half-second
+    base = float(np.clip(motion.mean() * 12, 0, 2))              # how lively the whole video is
+    stretch = min(10.0, hi * 0.25)
+    if dur <= hi + stretch:                                       # short video: use all of it
+        return [{"i": 0, "j": 0, "start": 0.0, "end": dur, "text": "", "visual": True,
+                 "score": base + 0.5 - abs(dur - target) / max(target, 1) * 0.5}]
+    cands = []
+    starts = sorted(set([0.0] + [c for c in cuts if c < dur - lo]))
+    t = 0.0
+    while t < dur - lo:                                           # every 2s, plus every scene cut
+        starts.append(t)
+        t += 2.0
+    for st in sorted(set(round(x, 1) for x in starts)):
+        en = min(dur, st + target)
+        nxt = [c for c in cuts if st + lo <= c <= st + hi]        # end on a cut if one is close
+        if nxt:
+            en = min(nxt, key=lambda c: abs(c - (st + target)))
+        a, b = int(st / HOP), max(int(en / HOP), int(st / HOP) + 1)
+        sc = float(act[a:b].mean()) if b <= n else float(act[a:].mean() if a < n else 0)
+        sc += 0.3 if st in cuts or st == 0 else 0                 # starting on a fresh shot
+        cands.append({"i": 0, "j": 0, "start": st, "end": en, "text": "", "visual": True,
+                      "score": base + sc})
+    return sorted(cands, key=lambda c: c["score"], reverse=True)
+
+
 def find_moments(src, args, lo, hi, target):
-    """Transcribe (cached), then score every possible clip in one video."""
+    """Transcribe (cached), then score every possible clip in one video.
+    Videos with (almost) no speech fall back to picking by movement and sound."""
     segs = [s for s in transcribe(src, args.model) if s["text"]]
-    if not segs:
-        die("no speech found in this video")
+    words = sum(len(s["text"].split()) for s in segs)
+    if words < 12:
+        cands = visual_moments(src, lo, hi, target)
+        if not cands:
+            die("video too short to use")
+        print(f"  no real speech - picking by movement and sound ({len(cands)} options)")
+        return segs, cands
     loud = loudness_curve(src)
     cands = build_candidates(segs, lo, hi, target)
     if not cands:
@@ -1238,14 +1302,20 @@ def auto_mode(args):
 
     k = args.k
     if not k:                                  # auto: about one clip per 2.5 minutes
-        dur = segs[-1]["end"] - segs[0]["start"]
-        k = max(2, min(10, round(dur / 150)))
-        print(f"  {short_ts(dur)} of speech - making {k} clips")
+        if cands and cands[0].get("visual"):
+            dur = duration_of(src)
+            k = max(1, min(6, round(dur / 60)))
+            print(f"  {short_ts(dur)} of footage - making {k} clip(s)")
+        else:
+            dur = segs[-1]["end"] - segs[0]["start"]
+            k = max(2, min(10, round(dur / 150)))
+            print(f"  {short_ts(dur)} of speech - making {k} clips")
     picks = ollama_pick(cands, k, args.ollama) if args.ollama else None
     picks = picks or pick(cands, k)
     for c in picks:
         if not c.get("title"):
-            c["title"] = " ".join(segs[c["i"]]["text"].split()[:6])
+            c["title"] = (f"{Path(str(src)).stem} at {short_ts(c['start'])}" if c.get("visual")
+                          else " ".join(segs[c["i"]]["text"].split()[:6]))
 
     folder = args.out_dir / slug(title, 50)
     folder.mkdir(parents=True, exist_ok=True)
@@ -1327,7 +1397,7 @@ def bulk_mode(args):
     lo, hi = (float(x) for x in args.len.split("-"))
     target = args.target or (lo + hi) / 2
     print(f"> bulk scrape: {len(vids)} videos")
-    pool, words_of, speech = [], {}, 0.0
+    pool, words_of, speech, visual = [], {}, 0.0, 0.0
     for i, v in enumerate(vids, 1):
         print(f"\n=== scan {i}/{len(vids)}: {v.name} ===")
         try:
@@ -1335,16 +1405,20 @@ def bulk_mode(args):
         except SystemExit:
             print(f"  ! nothing usable in {v.name}")
             continue
-        speech += segs[-1]["end"] - segs[0]["start"]
+        if cands and cands[0].get("visual"):
+            visual += min(duration_of(v), hi)
+        else:
+            speech += segs[-1]["end"] - segs[0]["start"]
         words_of[str(v)] = [w for s in segs for w in s["words"]]
         for cd in cands:
             cd["src"], cd["vid"] = str(v), v.stem
             if not cd.get("title"):
-                cd["title"] = " ".join(segs[cd["i"]]["text"].split()[:6])
+                cd["title"] = (f"at {short_ts(cd['start'])}" if cd.get("visual")
+                               else " ".join(segs[cd["i"]]["text"].split()[:6]))
         pool += cands
     if not pool:
         die("no usable moments found in any video")
-    k = args.k or max(3, min(30, round(speech / 150)))
+    k = args.k or max(3, min(30, round(speech / 150 + visual / 60)))
     cap = max(2, math.ceil(k * 0.4))           # keep some variety between videos
     pool.sort(key=lambda x: x["score"], reverse=True)
     picks, per = [], {}

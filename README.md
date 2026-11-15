@@ -82,6 +82,10 @@ against each other and makes the best N clips overall (`./clipper.py --bulk --ca
 or `-k 0` / *Auto* to decide from the amount of footage). Transcripts are saved, so after the first scan
 re-scraping the same folder is quick.
 
+**Footage with no talking** (product shots, UGC, gameplay with music): clipper notices there's no speech and
+picks by movement and sound instead – short videos are used whole, longer ones get their liveliest stretch,
+starting and ending on scene cuts. Videos shorter than the campaign's minimum are skipped.
+
 **Speed:** the web page's Fast / Good / Best use English-only speech models (`base.en`, `small.en`,
 `medium.en`) which are faster and more accurate for English. All CPU cores are used. An NVIDIA card with
 CUDA set up is several times faster again.
