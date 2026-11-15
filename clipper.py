@@ -755,7 +755,7 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", "-f", "mp4", str(out)])
 
 
-def make_clip(src, start, end, out: Path, args, words=None):
+def make_clip(src, start, end, out: Path, args, words=None, meta=None):
     """words given -> reuse transcript; else transcribe the clip if captions wanted."""
     if end <= start:
         die(f"end must be after start ({out.name})")
@@ -789,6 +789,13 @@ def make_clip(src, start, end, out: Path, args, words=None):
             "mode": args.mode, "captions": bool(args.captions),
             "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
             "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None)}
+    old = out.with_suffix(".clip.json")
+    if meta is None and old.is_file():              # restyle: keep the original pick info
+        try:
+            meta = json.loads(old.read_text()).get("meta")
+        except ValueError:
+            meta = None
+    side["meta"] = meta or {}
     out.with_suffix(".clip.json").write_text(json.dumps(side))
     print(f"  saved {out}")
 
@@ -959,7 +966,7 @@ def make_caption(c, text, n, ollama=None):
 CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
-                   "exact_captions", "checklist"]
+                   "exact_captions", "checklist", "rate"]
 
 
 def _clean_line(t):
@@ -1121,6 +1128,9 @@ def parse_brief(text):
     chk.append("Submit the post link in Whop within 30 minutes of posting")
     c["checklist"] = chk
     c["hashtags"], c["max_extra_hashtags"] = [], 3
+    rates = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)\s*(?:cpm|per\s*1,?000|per\s*1k|/\s*1k)", raw, re.I)]
+    rates += [float(x) for x in re.findall(r"(?:cpm|per 1k views|per 1,000 views)[^$\n]{0,20}\$\s?(\d+(?:\.\d+)?)", raw, re.I)]
+    c["rate"] = max(rates) if rates else None
     return c
 
 
@@ -1185,6 +1195,11 @@ def clean_campaign(d):
     out["caption_rules"] = s_(d.get("caption_rules"), 500)
     out["example_captions"] = lst(d.get("example_captions"), 200, 25)
     out["exact_captions"] = bool(d.get("exact_captions"))
+    try:
+        r = float(str(d.get("rate") or "").replace("$", "").strip() or 0)
+        out["rate"] = r if 0 < r < 100 else None
+    except ValueError:
+        out["rate"] = None
     out["checklist"] = lst(d.get("checklist"), 200, 30)
     return out
 
@@ -1344,6 +1359,73 @@ def clip_checks(f: Path, c=None):
         if short and short < 720:
             out.append(f"Low-res source ({short}p) - may look blurry")
     return out
+
+
+def clip_meta(c):
+    return {"score": round(float(c.get("score", 0)), 3), "visual": bool(c.get("visual")),
+            "kw": int(c.get("keyword_hits", 0)), "len": round(c["end"] - c["start"], 1),
+            "mix": bool(c.get("mix"))}
+
+
+def rate_clip(f: Path, c=None, checks=None, learn=None, rank=None):
+    """1-5 stars for how worthwhile a clip is to post, plus a short reason."""
+    import math
+    c = c or {}
+    side = {}
+    try:
+        side = json.loads(f.with_suffix(".clip.json").read_text())
+    except (OSError, ValueError):
+        pass
+    meta = side.get("meta") or {}
+    audio, dur, _ = _probe(f)
+    why = []
+    if "score" in meta:
+        moment = 1 / (1 + math.exp(-(meta["score"] - 1.0) / 1.5))
+        if rank is not None:                       # how it compares with the rest of its batch
+            moment = 0.55 * moment + 0.45 * rank
+    else:
+        moment = 0.5
+    stars = 1 + 2.4 * moment
+    why.append("strong moment" if moment > 0.7 else "decent moment" if moment > 0.45 else "weak moment")
+    rate = c.get("rate")
+    try:
+        rate = float(rate) if rate not in (None, "") else None
+    except ValueError:
+        rate = None
+    if rate:
+        stars += min(1.0, rate / 2.5)
+        if rate >= 2:
+            why.append(f"top pay (${rate:g}/1k)")
+        elif rate <= 0.6:
+            why.append(f"low pay (${rate:g}/1k)")
+    else:
+        stars += 0.4
+    if audio:
+        stars += 0.4
+        why.append("mixed b-roll" if meta.get("mix") else "has sound")
+    else:
+        stars -= 0.6
+        why.append("silent")
+    if c.get("keywords") and meta.get("kw"):
+        stars += 0.2
+        why.append("mentions " + c["keywords"][0])
+    probs = [w for w in (checks or []) if not w.startswith("No sound")]
+    for w in probs:
+        stars -= 0.3 if w.startswith("Low-res") else 0.6
+    if probs:
+        why.append(f"{len(probs)} warning{'s' if len(probs) > 1 else ''}")
+    if learn:
+        bonus, note = learn_bonus(learn, meta, dur)
+        stars += bonus
+        if note:
+            why.append(note)
+    stars = max(1.0, min(5.0, round(stars * 2) / 2))
+    return stars, ", ".join(why[:4]).capitalize()
+
+
+def learn_bonus(learn, meta, dur):
+    """Placeholder until results are recorded (see results tracker)."""
+    return 0.0, ""
 
 
 def campaign_checks(cid):
@@ -1539,7 +1621,7 @@ def auto_mode(args):
 
     words = [w for s in segs for w in s["words"]]
     for c in sorted(picks, key=lambda c: c["start"]):
-        make_clip(src, c["start"], c["end"], folder / f"{c['name']}.mp4", args, words)
+        make_clip(src, c["start"], c["end"], folder / f"{c['name']}.mp4", args, words, clip_meta(c))
     print(f"\ndone - {len(picks)} clips in {folder}")
 
 
@@ -1660,7 +1742,8 @@ def bulk_mode(args):
         return
     print("\n=== rendering ===")
     for cd in picks:
-        make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]])
+        make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]],
+                  clip_meta(cd))
     print(f"\ndone - {len(picks)} clips in {out}")
 
 
@@ -1784,6 +1867,8 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.stars{padding:7px 8px 0;color:#ffcf3d;font-size:14px;letter-spacing:1px}.stars b{color:var(--text);font-size:12px;letter-spacing:0}
+.why{padding:1px 8px 0;font-size:11px;color:var(--dim)}
 .readybar{display:flex;gap:10px;align-items:center;background:#123726;border:1px solid var(--ok);border-radius:14px;
   padding:10px 12px;margin-bottom:14px;font-size:14px}.readybar span{flex:1}
 #updbtn.has{border-color:var(--acc2);color:var(--acc2)}
@@ -2021,6 +2106,7 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <label class="wide">Footage link / note<input type="text" id="cf_source_note"></label>
    <label class="chk"><input type="checkbox" id="cf_music"> Background music allowed</label>
    <label>Minimum length (seconds)<input type="text" id="cf_min_len"></label>
+   <label>Pay per 1,000 views ($)<input type="text" id="cf_rate" placeholder="e.g. 2.50 (best platform)"></label>
    <label>Clip length range<input type="text" id="cf_len" placeholder="20-60"></label>
    <label>Tag in caption<input type="text" id="cf_mention" placeholder="@brand"></label>
    <label>Disclosure hashtag<input type="text" id="cf_disclosure" placeholder="#Ad"></label>
@@ -2301,7 +2387,7 @@ $('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testing�
 /* ---------- campaign builder ---------- */
 let cdEditId='';
 const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist'],
-      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules'];
+      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){
   const box=$('#cf_files');
@@ -2451,6 +2537,8 @@ async function loadClips(){
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
           <div class="ov"></div><div class="badge">✓ Restyled</div></div>
+        <div class="stars" title="${esc(c.why||'')}">${starStr(c.stars)} <b>${(c.stars||0).toFixed(1)}</b></div>
+        <div class="why">${esc(c.why||'')}</div>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
         ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
@@ -2460,6 +2548,7 @@ async function loadClips(){
       </div>`).join('')}</div></div>`).join('');
   markBusy();
 }
+function starStr(n){n=n||0;let s='';for(let i=1;i<=5;i++)s+=n>=i?'★':n>=i-.5?'⯪':'☆';return s}
 /* ---------- review: watch, keep or drop, delete the rest ---------- */
 let lastGroups=[], rvList=[], rvI=0, rvMark={}, rvName='';
 function review(gi){
@@ -2469,7 +2558,7 @@ function review(gi){
 function rvShow(){
   const c=rvList[rvI]; if(!c)return;
   const v=$('#rvvideo'); v.src=`/clips/${enc(c.path)}?v=${c.v}`; v.play().catch(()=>{});
-  $('#rvcap').innerHTML=esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
+  $('#rvcap').innerHTML=`<div style="color:#ffcf3d">${starStr(c.stars)} <b style="color:var(--text)">${(c.stars||0).toFixed(1)}</b> · ${esc(c.why||'')}</div>`+esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
   const kept=Object.values(rvMark).filter(x=>x==='keep').length, dropped=Object.values(rvMark).filter(x=>x==='drop').length;
   $('#rvpos').textContent=`Clip ${rvI+1} of ${rvList.length} · ⭐ ${kept} kept · ✕ ${dropped} dropped`;
   const st=$('#rvstamp'), m=rvMark[c.path]; st.className='rvstamp'+(m?' '+m:''); st.textContent=m==='keep'?'⭐ Keeping':m==='drop'?'✕ Dropping':'';
@@ -2767,6 +2856,9 @@ def serve_ui(args):
     threading.Thread(target=worker, daemon=True).start()
 
     # ---------- helpers ----------
+    def learn_data():
+        return None                                   # filled in by the results tracker
+
     def version_info(fetch=False):
         repo = Path(__file__).resolve().parent
         g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, timeout=60)
@@ -2835,11 +2927,22 @@ def serve_ui(args):
                 groups.setdefault(g, []).append(
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
                      "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
-                     "checks": clip_checks(f, camp),
+                     "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
         for name, clips in groups.items():
-            clips.sort(key=lambda c: c["name"])
+            sc = []
+            for cl in clips:
+                try:
+                    sc.append(json.loads(cl["_f"].with_suffix(".clip.json").read_text()).get("meta", {}).get("score"))
+                except (OSError, ValueError):
+                    sc.append(None)
+            known = sorted(x for x in sc if x is not None)
+            ld = learn_data()
+            for cl, x in zip(clips, sc):
+                rank = (known.index(x) / (len(known) - 1) if len(known) > 1 else 0.5) if x is not None else None
+                cl["stars"], cl["why"] = rate_clip(cl.pop("_f"), cl.pop("_camp"), cl["checks"], ld, rank)
+            clips.sort(key=lambda c: (-c["stars"], c["name"]))
             out.append({"name": name, "clips": clips, "mtime": max(c["mtime"] for c in clips)})
         return sorted(out, key=lambda g: g["mtime"], reverse=True)
 
