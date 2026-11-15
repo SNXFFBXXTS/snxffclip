@@ -56,6 +56,9 @@ If you have an NVIDIA card without CUDA set up, it automatically falls back to t
 ./clipper.py --ui
 ```
 Open **http://localhost:8765**. Paste a link or pick a campaign + footage, press **Find the best clips**.
+Each batch of clips has a **🎬 Review** button: watch them one by one, tap ⭐ Keep or ✕ Drop (keys K / D,
+arrows to move), then *Done* keeps the starred ones and deletes the rest. The **History** tab lists every
+run – finished, failed or cancelled – with how long it took, clips made, errors and the log.
 Clips show up at the bottom with **Save**, **Delete** and **Copy caption** buttons.
 
 To use it from your phone, install [Tailscale](https://tailscale.com) on the PC and the phone, then open `http://YOUR-PC-NAME:8765`.

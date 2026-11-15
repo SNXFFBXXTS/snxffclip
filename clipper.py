@@ -213,6 +213,8 @@ HYPE = re.compile(
 def loudness_curve(path: Path):
     """Loudness (z-scored dB) every HOP seconds, via ffmpeg -> numpy."""
     import numpy as np
+    if not has_audio(path):
+        return np.zeros(max(1, int(duration_of(path) / HOP) + 1))
     sr = 8000
     n = int(sr * HOP)
     p = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vn",
@@ -1575,6 +1577,33 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.tabs{display:flex;gap:6px;margin:26px 0 10px}
+.tab{background:none;border:1px solid var(--line);color:var(--dim);border-radius:20px;padding:6px 14px;font:inherit;font-size:13px}
+.tab.on{background:var(--line);color:var(--text)}
+.hist{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 12px;margin-bottom:8px}
+.hist .top{display:flex;gap:10px;align-items:baseline;justify-content:space-between}
+.hist .st{font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.st.done{background:#173d2c;color:var(--ok)}.st.error{background:#3d1722;color:var(--acc)}.st.cancelled{background:#2b2b2b;color:var(--dim)}
+.hist .meta{color:var(--dim);font-size:12px;margin-top:3px}
+.gbtn{background:none;border:1px solid var(--acc2);color:var(--acc2);border-radius:8px;padding:4px 10px;font-size:12px}
+.rv{background:#08090c;color:var(--text);border:1px solid var(--line);border-radius:18px;padding:14px;width:min(560px,96vw);max-height:96vh}
+.rv::backdrop{background:#000d}
+.rvtop{display:flex;justify-content:space-between;align-items:start;gap:10px}
+.rvmain{display:flex;align-items:center;gap:6px;margin-top:10px}
+.rvvid{position:relative;flex:1;display:flex;justify-content:center}
+.rvvid video{height:min(62vh,640px);aspect-ratio:9/16;background:#000;border-radius:12px;max-width:100%}
+.rvstamp{position:absolute;top:10px;left:50%;transform:translateX(-50%);font-weight:700;padding:4px 12px;border-radius:20px;display:none}
+.rvstamp.keep{display:block;background:#173d2cee;color:var(--ok)}.rvstamp.drop{display:block;background:#3d1722ee;color:var(--acc)}
+.rvnav{background:var(--card);border:1px solid var(--line);color:var(--text);border-radius:50%;width:40px;height:40px;font-size:24px;line-height:1}
+.rvcap{font-size:12px;color:var(--dim);white-space:pre-line;margin:8px 0;max-height:60px;overflow:auto}
+.rvbtns{display:flex;gap:10px}
+.rvbtns button{flex:1;padding:13px;border-radius:12px;font:600 16px system-ui;border:0}
+.rvbtns small{opacity:.6;font-weight:400;font-size:11px;margin-left:4px}
+.rvkeep{background:linear-gradient(90deg,#1fb37a,#3ddc97);color:#06281a}
+.rvdrop{background:#2a1a20;color:var(--acc);border:1px solid #4a2230 !important}
+.rvstrip{display:flex;gap:5px;overflow-x:auto;margin:10px 0}
+.rvstrip img{width:40px;aspect-ratio:9/16;object-fit:cover;border-radius:5px;border:2px solid transparent;opacity:.75;cursor:pointer;flex-shrink:0}
+.rvstrip img.cur{border-color:#fff;opacity:1}.rvstrip img.keep{border-color:var(--ok);opacity:1}.rvstrip img.drop{opacity:.25}
 .cdlg{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:16px;
   width:min(680px,94vw);max-height:90vh}
 .cdlg::backdrop{background:#000b}
@@ -1771,8 +1800,25 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
  </div>
 </dialog>
 
-<h2>Jobs</h2>
+<div class="tabs"><button type="button" class="tab on" data-t="jobs">Jobs</button>
+  <button type="button" class="tab" data-t="history">History</button></div>
 <div id="jobs"><div class="empty">Nothing running</div></div>
+<div id="history" style="display:none"></div>
+
+<dialog id="rv" class="rv">
+ <div class="rvtop"><div><b id="rvgroup"></b><div class="s" id="rvpos" style="color:var(--dim);font-size:12px"></div></div>
+   <button type="button" class="small" id="rvclose">✕</button></div>
+ <div class="rvmain">
+   <button type="button" class="rvnav" id="rvprev">‹</button>
+   <div class="rvvid"><video id="rvvideo" controls playsinline autoplay></video><div id="rvstamp" class="rvstamp"></div></div>
+   <button type="button" class="rvnav" id="rvnext">›</button>
+ </div>
+ <div class="rvcap" id="rvcap"></div>
+ <div class="rvbtns"><button type="button" class="rvdrop" id="rvdrop">✕ Drop <small>D</small></button>
+   <button type="button" class="rvkeep" id="rvkeep">⭐ Keep <small>K</small></button></div>
+ <div class="rvstrip" id="rvstrip"></div>
+ <button type="button" class="go" id="rvdone">Done</button>
+</dialog>
 
 <h2>Your clips</h2>
 <div id="clips"><div class="empty">Loading…</div></div>
@@ -2098,9 +2144,11 @@ async function loadClips(){
   const el=$('#clips');
   if(!groups.length){el.innerHTML='<div class="empty">No clips yet — paste a link above</div>';return}
   groups.forEach(g=>g.clips.forEach(c=>{if(c.caption)capStore[c.path]=c.caption}));
-  el.innerHTML=groups.map(g=>`
+  lastGroups=groups;
+  el.innerHTML=groups.map((g,gi)=>`
     <div class="group"><div class="gname"><span>${esc(g.name)}</span>
-      <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span></div>
+      <span style="display:flex;gap:8px;align-items:center"><span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
+      <button class="gbtn" onclick="review(${gi})">🎬 Review</button></span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
@@ -2113,6 +2161,61 @@ async function loadClips(){
       </div>`).join('')}</div></div>`).join('');
   markBusy();
 }
+/* ---------- review: watch, keep or drop, delete the rest ---------- */
+let lastGroups=[], rvList=[], rvI=0, rvMark={}, rvName='';
+function review(gi){
+  const g=lastGroups[gi]; if(!g)return;
+  rvList=g.clips; rvI=0; rvMark={}; rvName=g.name; $('#rvgroup').textContent=g.name; rvShow(); $('#rv').showModal();
+}
+function rvShow(){
+  const c=rvList[rvI]; if(!c)return;
+  const v=$('#rvvideo'); v.src=`/clips/${enc(c.path)}?v=${c.v}`; v.play().catch(()=>{});
+  $('#rvcap').textContent=c.caption||c.name;
+  const kept=Object.values(rvMark).filter(x=>x==='keep').length, dropped=Object.values(rvMark).filter(x=>x==='drop').length;
+  $('#rvpos').textContent=`Clip ${rvI+1} of ${rvList.length} · ⭐ ${kept} kept · ✕ ${dropped} dropped`;
+  const st=$('#rvstamp'), m=rvMark[c.path]; st.className='rvstamp'+(m?' '+m:''); st.textContent=m==='keep'?'⭐ Keeping':m==='drop'?'✕ Dropping':'';
+  $('#rvstrip').innerHTML=rvList.map((x,i)=>`<img src="/thumb/${enc(x.path)}?v=${x.v}" class="${i===rvI?'cur ':''}${rvMark[x.path]||''}" onclick="rvI=${i};rvShow()">`).join('');
+  const unmarked=rvList.filter(x=>!rvMark[x.path]).length;
+  $('#rvdone').textContent=kept?`Done — keep ${kept}, delete ${rvList.length-kept}`+(unmarked?` (incl. ${unmarked} not marked)`:''):'Done';
+}
+function rvSet(m){const c=rvList[rvI];rvMark[c.path]=m; if(rvI<rvList.length-1)rvI++; rvShow()}
+$('#rvkeep').onclick=()=>rvSet('keep'); $('#rvdrop').onclick=()=>rvSet('drop');
+$('#rvprev').onclick=()=>{if(rvI>0){rvI--;rvShow()}}; $('#rvnext').onclick=()=>{if(rvI<rvList.length-1){rvI++;rvShow()}};
+$('#rvclose').onclick=()=>{$('#rvvideo').pause();$('#rv').close()};
+$('#rv').addEventListener('close',()=>$('#rvvideo').pause());
+document.addEventListener('keydown',e=>{ if(!$('#rv').open)return;
+  if(e.key==='k'||e.key==='K')rvSet('keep'); else if(e.key==='d'||e.key==='D')rvSet('drop');
+  else if(e.key==='ArrowRight')$('#rvnext').click(); else if(e.key==='ArrowLeft')$('#rvprev').click();});
+$('#rvdone').onclick=async()=>{
+  const keep=rvList.filter(x=>rvMark[x.path]==='keep');
+  if(!keep.length){ if(confirm('You haven\'t kept any. Close without deleting anything?')){$('#rv').close()} return }
+  const gone=rvList.filter(x=>rvMark[x.path]!=='keep');
+  if(!gone.length){$('#rv').close();return}
+  if(!confirm(`Keep ${keep.length} clip(s) and permanently delete the other ${gone.length}?`))return;
+  $('#rvvideo').pause(); $('#rvvideo').removeAttribute('src');
+  await api('/api/deletemany',{paths:gone.map(x=>x.path)}); $('#rv').close(); loadClips();
+};
+
+/* ---------- tabs + history ---------- */
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
+  $('#jobs').style.display=b.dataset.t==='jobs'?'':'none'; $('#history').style.display=b.dataset.t==='history'?'':'none';
+  if(b.dataset.t==='history')loadHistory();
+});
+async function loadHistory(){
+  const h=await api('/api/history'), el=$('#history');
+  if(!h.length){el.innerHTML='<div class="empty">Nothing in the history yet</div>';return}
+  const when=t=>new Date(t*1000).toLocaleString([], {weekday:'short',hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'});
+  el.innerHTML=h.map(x=>`<div class="hist">
+    <div class="top"><b style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.title||x.kind)}</b>
+      <span class="st ${x.status}">${x.status==='done'?'✓ Done':x.status==='error'?'✕ Failed':'Cancelled'}</span></div>
+    <div class="meta">${esc(x.kind)}${x.campaign?' · '+esc(x.campaign):''} · ${when(x.started)} · took ${fmtDur(x.secs)}${x.made?` · ${x.made} clip${x.made>1?'s':''}`:''}</div>
+    ${x.error?`<div class="meta" style="color:var(--acc)">${esc(x.error)}</div>`:''}
+    <details><summary>Log</summary><pre>${esc((x.log||[]).join('\n'))}</pre></details></div>`).join('')+
+    '<button type="button" class="small" onclick="clearHistory()">Clear history</button>';
+}
+async function clearHistory(){if(!confirm('Clear the whole history?'))return;await api('/api/history/clear',{});loadHistory()}
+
 async function del(p){
   if(!confirm('Delete this clip?'))return;
   await api('/api/delete',{path:p}); loadClips();
@@ -2292,7 +2395,45 @@ def serve_ui(args):
                 cmd.append("--match-colors")
             run_job(job, cmd)
 
+    hist_file = CACHE / "history.json"
+    hist_lock = threading.Lock()
+
+    def add_history(job):
+        p = job.get("params", {})
+        kind = ("Restyle" if p.get("restyle") else "Bulk folder scrape" if p.get("bulk")
+                else "Clip each video" if p.get("batch") else "Clip a video")
+        url = p.get("url") or ""
+        camp_name = (p.get("campaign") or "").split("/")[-1].replace("-", " ")
+        if p.get("restyle"):
+            title = Path(p["restyle"]).stem
+        elif p.get("batch") or p.get("bulk"):
+            title = camp_name or "folder"
+        else:
+            title = url if is_url(url) else Path(url).name if url else (job.get("title") or "")
+        entry = {"title": title, "kind": kind, "status": job["status"],
+                 "campaign": p.get("campaign", ""), "started": job.get("started") or time.time(),
+                 "secs": time.time() - (job.get("started") or time.time()), "made": job.get("made", 0),
+                 "error": job.get("error", "") if job["status"] == "error" else "",
+                 "log": list(job.get("log", []))[-80:]}
+        with hist_lock:
+            try:
+                h = json.loads(hist_file.read_text()) if hist_file.is_file() else []
+            except ValueError:
+                h = []
+            h.insert(0, entry)
+            hist_file.write_text(json.dumps(h[:300]))
+
     def run_job(job, cmd):
+            job["started"] = time.time()
+            try:
+                run_job_inner(job, cmd)
+            finally:
+                if job["status"] == "running":
+                    job["status"] = "error"
+                    job["error"] = job.get("error") or "Stopped unexpectedly"
+                add_history(job)
+
+    def run_job_inner(job, cmd):
             job["status"], job["stage"] = "running", ("Re-rendering…" if job.get("clip") else "Starting…")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     start_new_session=True)
@@ -2324,6 +2465,22 @@ def serve_ui(args):
     threading.Thread(target=worker, daemon=True).start()
 
     # ---------- helpers ----------
+    def delete_clip(rel):
+        f, root = safe(rel, want_root=True)
+        if not f or f.suffix != ".mp4":
+            return False
+        f.unlink()
+        for extra in (f.with_suffix(".txt"), f.with_suffix(".clip.json")):
+            if extra.is_file():
+                extra.unlink()
+        folder = f.parent
+        if folder != root and not any(folder.glob("*.mp4")):
+            for x in folder.iterdir():
+                if x.is_file():
+                    x.unlink()
+            folder.rmdir()
+        return True
+
     def roots():
         """key -> (clips folder, label). '_' is ~/Clips, others are campaigns."""
         r = {"_": (out_root, "")}
@@ -2501,6 +2658,11 @@ def serve_ui(args):
             elif u.path == "/api/jobs":
                 with lock:
                     self.send_json([public(jobs[i]) for i in reversed(order)])
+            elif u.path == "/api/history":
+                try:
+                    self.send_json(json.loads(hist_file.read_text()) if hist_file.is_file() else [])
+                except ValueError:
+                    self.send_json([])
             elif u.path == "/api/downloads":
                 self.send_json(downloads_list())
             elif u.path == "/api/campaign":
@@ -2643,7 +2805,10 @@ def serve_ui(args):
             elif u.path == "/api/cancel":
                 job = jobs.get(d.get("id"))
                 if job and job["status"] in ("queued", "running"):
+                    was_queued = job["status"] == "queued"
                     job["status"], job["stage"] = "cancelled", "Cancelled"
+                    if was_queued:
+                        add_history(job)
                     if job["proc"]:
                         try:
                             os.killpg(job["proc"].pid, signal.SIGTERM)
@@ -2658,18 +2823,15 @@ def serve_ui(args):
                         order.remove(job["id"])
                 self.send_json({"ok": True})
             elif u.path == "/api/delete":
-                f, root = safe(str(d.get("path", "")), want_root=True)
-                if f and f.suffix == ".mp4":
-                    f.unlink()
-                    for extra in (f.with_suffix(".txt"), f.with_suffix(".clip.json")):
-                        if extra.is_file():
-                            extra.unlink()
-                    folder = f.parent
-                    if folder != root and not any(folder.glob("*.mp4")):
-                        for x in folder.iterdir():
-                            if x.is_file():
-                                x.unlink()
-                        folder.rmdir()
+                delete_clip(str(d.get("path", "")))
+                self.send_json({"ok": True})
+            elif u.path == "/api/deletemany":
+                paths = [str(x) for x in (d.get("paths") or []) if isinstance(x, str)][:500]
+                n = sum(1 for x in paths if delete_clip(x))
+                self.send_json({"ok": True, "deleted": n})
+            elif u.path == "/api/history/clear":
+                with hist_lock:
+                    hist_file.write_text("[]")
                 self.send_json({"ok": True})
             else:
                 self.send_error(404)
