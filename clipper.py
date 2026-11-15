@@ -238,16 +238,26 @@ def loudness_curve(path: Path):
 def build_candidates(segs, min_len, max_len, target):
     """Every sentence-aligned window between min_len and max_len seconds."""
     cands = []
+    ends_sentence = lambda t: bool(re.search(r"[.!?…][\"')\]]*\s*$", t.strip()))
+    stretch = min(10.0, max_len * 0.25)            # allowed overrun to let a sentence finish
     for i in range(len(segs)):
-        best = None
+        best, best_end = None, None
         for j in range(i, len(segs)):
             if j > i and segs[j]["start"] - segs[j - 1]["end"] > 4.0:
                 break                              # long silence - don't bridge it
             dur = segs[j]["end"] - segs[i]["start"]
-            if dur > max_len:
+            if dur > max_len + stretch:
                 break
-            if dur >= min_len and (best is None or abs(dur - target) < abs(best[1] - target)):
+            if dur < min_len:
+                continue
+            if ends_sentence(segs[j]["text"]):
+                over = max(0.0, dur - max_len) * 3     # overrunning is allowed but discouraged
+                if best_end is None or abs(dur - target) + over < best_end[2]:
+                    best_end = (j, dur, abs(dur - target) + over)
+            if dur <= max_len and (best is None or abs(dur - target) < abs(best[1] - target)):
                 best = (j, dur)
+        if best_end:
+            best = best_end[:2]                    # a finished sentence beats a closer length
         if best:
             j, _ = best
             start, end = clean_bounds(segs, i, j)
@@ -264,7 +274,7 @@ def last_word_end(seg):
     return seg["words"][-1][1] if seg["words"] else seg["end"]
 
 
-def clean_bounds(segs, i, j, pre=0.45, post=0.7):
+def clean_bounds(segs, i, j, pre=0.45, post=1.1):
     """Cut on word timings with breathing room, without catching the
     tail of the previous word or the start of the next one."""
     s = first_word_start(segs[i])
@@ -276,8 +286,8 @@ def clean_bounds(segs, i, j, pre=0.45, post=0.7):
     end = e + post
     if j + 1 < len(segs):
         nxt = first_word_start(segs[j + 1])
-        end = min(end, e + (nxt - e) * 0.6) if nxt > e else e + 0.1
-        end = max(end, e + 0.25)          # whisper ends words a touch early
+        end = min(end, e + (nxt - e) * 0.7) if nxt > e else e + 0.15
+        end = max(end, e + 0.35)          # whisper ends words a touch early
     return max(0.0, start), end
 
 
@@ -627,6 +637,12 @@ def duration_of(path: Path) -> float:
         return 0.0
 
 
+def has_audio(path: Path) -> bool:
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                        "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    return bool(r.stdout.strip())
+
+
 def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0):
     if mode == "crop":      # zoom to fill, cut the sides off
         v = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0]"
@@ -636,16 +652,21 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
              f"boxblur=25:2[bg];[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]")
     else:
         v = "[0:v]null[v0]"
+    d = duration_of(raw) or 60
+    vfade = f"fade=t=in:d=0.12,fade=t=out:st={max(d - 0.3, 0):.2f}:d=0.3"
     if subs:
         fd = f":fontsdir='{FONTS_DIR}'" if FONTS_DIR.is_dir() else ""
-        v += f";[v0]subtitles='{subs}'{fd}[v]"
+        v += f";[v0]subtitles='{subs}'{fd},{vfade}[v]"
     else:
-        v += ";[v0]null[v]"
+        v += f";[v0]{vfade}[v]"
 
     inputs = ["-i", str(raw)]
     amap = "0:a?"
+    afade = f"afade=t=in:d=0.06,afade=t=out:st={max(d - 0.45, 0):.2f}:d=0.45"
+    if not music and has_audio(raw):
+        v += f";[0:a]{afade}[a]"
+        amap = "[a]"
     if music:
-        d = duration_of(raw) or 60
         inputs += ["-stream_loop", "-1", "-ss", f"{music_start:.2f}", "-i", str(music)]
         # music bed: fade in/out, then duck it whenever someone speaks
         v += (f";[1:a]aformat=sample_rates=48000:channel_layouts=stereo,"
@@ -653,7 +674,7 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
               f"afade=t=out:st={max(d - 1.5, 0):.2f}:d=1.5[m];"
               f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit[sp1][sp2];"
               f"[m][sp1]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[md];"
-              f"[sp2][md]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
+              f"[sp2][md]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{afade}[a]")
         amap = "[a]"
     run(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
          "-filter_complex", v, "-map", "[v]", "-map", amap,
