@@ -1234,6 +1234,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
       <div id="bulkbox" class="bulkbox" style="display:none">
         <div class="bulkhead">🔎 Bulk folder scrape</div>
         <div class="s" id="bulkinfo" style="font-size:12.5px;color:var(--dim);margin:4px 0 8px"></div>
+        <label class="toggle" id="mvdlbox" style="margin:2px 0 10px;display:none"><input type="checkbox" id="mvdl" checked>
+          <span id="mvdltxt"></span></label>
         <label style="font-size:12px;color:var(--dim)">Best clips overall: <b id="bulkkv">Auto</b></label>
         <input type="range" id="bulkk" min="0" max="30" value="0">
         <button type="button" class="go" id="bulkgo" style="margin-top:10px;padding:12px;
@@ -1479,8 +1481,11 @@ async function loadSources(){
     r.downloads.map(p=>`<option value="${esc(p)}">📥 ${esc(base(p))}${len(p)}</option>`).join('')+'</optgroup>';
   $('#src').innerHTML=h; $('#srcbox').style.display='';
   const tot=r.source.reduce((a,p)=>a+((r.dur||{})[p]||0),0);
-  $('#bulkbox').style.display=r.source.length?'':'none';
-  $('#bulkinfo').innerHTML=`${r.source.length} video${r.source.length>1?'s':''} · ${fmtDur(tot)} total in ${esc(r.folder)}.<br>`+
+  const dlTot=r.downloads.reduce((a,p)=>a+((r.dur||{})[p]||0),0);
+  $('#bulkbox').style.display=(r.source.length||r.downloads.length)?'':'none';
+  $('#mvdlbox').style.display=r.downloads.length?'':'none';
+  $('#mvdltxt').innerHTML=`Move the <b>${r.downloads.length}</b> 📥 video${r.downloads.length>1?'s':''} from Downloads (${fmtDur(dlTot)}) into this campaign first`;
+  $('#bulkinfo').innerHTML=`${r.source.length} video${r.source.length!==1?'s':''} · ${fmtDur(tot)} already in ${esc(r.folder)}.<br>`+
     (r.unscanned?`${r.unscanned} not scanned yet - the first scan of ~${fmtDur(r.unscanned_dur)} of footage takes a while. Re-scrapes are quick.`
                 :`All scanned - a re-scrape only takes a moment.`);
   const b=$('#batchgo');
@@ -1493,7 +1498,7 @@ function fmtDur(s){s=Math.round(s||0);const h=Math.floor(s/3600),m=Math.floor(s%
 $('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'Auto';
 $('#bulkgo').onclick=async()=>{
   const b=$('#bulkgo'); b.disabled=true;
-  const r=await api('/api/jobs',{bulk:true,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
+  const r=await api('/api/jobs',{bulk:true,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
     captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
@@ -2014,6 +2019,10 @@ def serve_ui(args):
                 url = str(d.get("url", "")).strip()
                 bulk = bool(d.get("bulk"))
                 batch = bool(d.get("batch")) or bulk
+                if bulk and d.get("move_dl") and d.get("campaign") in [c for c, _, _ in list_campaigns()]:
+                    camp_c = {"id": d["campaign"]}
+                    for f in sources(d["campaign"])["downloads"]:
+                        file_into_campaign(f, camp_c)
                 if batch and not d.get("campaign"):
                     return self.send_json({"error": "Pick a campaign first"}, 400)
                 if not url and not batch:
