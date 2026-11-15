@@ -1098,8 +1098,12 @@ def clean_campaign(d):
 DOWNLOADS = Path.home() / "Downloads"
 
 
+_DUR_CACHE = {}
+
+
 def downloads_list(days=30):
-    """Recent videos and zips in ~/Downloads."""
+    """Recent videos and zips in ~/Downloads (lengths checked in parallel, cached)."""
+    from concurrent.futures import ThreadPoolExecutor
     out = []
     if not DOWNLOADS.is_dir():
         return out
@@ -1114,7 +1118,18 @@ def downloads_list(days=30):
         ext = f.suffix.lower()
         if ext in VIDEO_EXT or ext == ".zip":
             out.append({"path": str(f), "name": f.name, "size": st.st_size, "mtime": st.st_mtime,
-                        "zip": ext == ".zip", "dur": duration_of(f) if ext in VIDEO_EXT else 0})
+                        "zip": ext == ".zip", "dur": 0})
+
+    def length(item):
+        if item["zip"]:
+            return
+        key = (item["path"], item["size"], item["mtime"])
+        if key not in _DUR_CACHE:
+            _DUR_CACHE[key] = duration_of(Path(item["path"]))
+        item["dur"] = _DUR_CACHE[key]
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(length, out))
     return sorted(out, key=lambda x: x["mtime"], reverse=True)
 
 
@@ -1889,7 +1904,11 @@ const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions',
       TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){
-  const list=await api('/api/downloads'), box=$('#cf_files');
+  const box=$('#cf_files');
+  box.innerHTML='<div class="s" style="color:var(--dim);font-size:13px;padding:6px">🔎 Looking in Downloads…</div>';
+  let list;
+  try{list=await api('/api/downloads')}catch(e){
+    box.innerHTML='<div class="s" style="color:var(--acc);font-size:13px;padding:6px">Couldn\'t read Downloads - restart clipper and try again.</div>';return}
   const words=[$('#cf_name').value,$('#cf_keywords').value,$('#cf_agency').value].join(' ').toLowerCase()
      .split(/[^a-z0-9]+/).filter(w=>w.length>=3&&!STOP.has(w));
   if(!list.length){box.innerHTML='<div class="s" style="color:var(--dim);font-size:13px;padding:6px">No videos or zips downloaded in the last 30 days.</div>';return}
