@@ -128,6 +128,12 @@ caption not from the approved list, missing @tag or #ad, doesn't mention the cam
 from low-res footage. Each campaign is also checked against its saved brief (music allowed when the brief
 bans it, word-for-word captions off, on-screen text that's just a hashtag, missing tag/disclosure…).
 
+### Platform buttons and the link timer
+Under every campaign clip there's a button for each platform the campaign pays on. Each one says when that
+clip is next due to be posted there (from your 🗓 Plan times, best clips first, spaced out) – or *post now*.
+After posting, tap the button: it starts a 30-minute countdown to submit the link on Whop. Tap it again to
+paste the link; it turns green. Platforms you haven't ticked as your accounts show as *no account*.
+
 ### Logo watermark
 If a campaign needs the brand's logo on every clip, put the logo image (PNG with a transparent background is
 best) in the campaign folder and set *Logo watermark file* (e.g. `logo.png`). It goes just above the video in

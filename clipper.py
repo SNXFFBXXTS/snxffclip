@@ -2280,6 +2280,15 @@ select:disabled{opacity:.45}
 .rtable tr.stale input{border-color:#ffb03d}
 .rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
 .postedb{padding:2px 8px 0;font-size:11px;color:var(--ok)}
+.plats{display:flex;flex-wrap:wrap;gap:5px;padding:7px 8px 0}
+.pt{flex:1 1 auto;min-width:0;border:1px solid var(--line);background:none;color:var(--dim);border-radius:8px;
+  font-size:11px;padding:5px 6px;cursor:pointer;line-height:1.25;text-align:center;white-space:nowrap}
+.pt b{display:block;font-size:12px;color:var(--fg,#eee)}
+.pt.now{border-color:#ff4d8d;color:#ff8db5}
+.pt.timer{border-color:#ffb03d;color:#ffb03d}
+.pt.late{border-color:#ff4d4d;color:#ff6b6b;background:#ff4d4d1a}
+.pt.done{border-color:var(--ok);color:var(--ok);cursor:default}
+.pt.off{opacity:.45}
 .stars{padding:7px 8px 0;color:#ffcf3d;font-size:14px;letter-spacing:1px}.stars b{color:var(--text);font-size:12px;letter-spacing:0}
 .why{padding:1px 8px 0;font-size:11px;color:var(--dim)}
 .readybar{display:flex;gap:10px;align-items:center;background:#123726;border:1px solid var(--ok);border-radius:14px;
@@ -2796,7 +2805,7 @@ $('#batchgo').onclick=async()=>{
   poll(); setTimeout(loadSources,3000);
 };
 $('#src').onchange=e=>{ if(e.target.value) $('#url').value=e.target.value; };
-loadCamps();
+const campsReady=loadCamps();
 async function campCheck(){
   const id=$('#camp').value, el=$('#campchk'); if(!id){el.innerHTML='';return}
   const r=await api('/api/campaigncheck?id='+encodeURIComponent(id));
@@ -2982,6 +2991,8 @@ async function loadClips(){
   if(!groups.length){el.innerHTML='<div class="empty">No clips yet — paste a link above</div>';return}
   groups.forEach(g=>g.clips.forEach(c=>{if(c.caption)capStore[c.path]=c.caption}));
   lastGroups=groups;
+  await campsReady; if(!plSet.plan_windows) plSet=await api('/api/settings');
+  dueAt={}; groups.forEach(g=>{const pl=computePlan(g); if(pl.rows) pl.rows.forEach(r=>dueAt[r.c.path+'|'+r.p]=r.t)});
   el.innerHTML=groups.map((g,gi)=>`
     <div class="group"><div class="gname"><span>${esc(g.name)}</span>
       <span style="display:flex;gap:8px;align-items:center">${(()=>{const n=g.clips.filter(c=>(c.checks||[]).length).length;return n?`<span class="gwarn">⚠ ${n} need a look</span>`:''})()}
@@ -2995,7 +3006,7 @@ async function loadClips(){
         <div class="stars" title="${esc(c.why||'')}">${starStr(c.stars)} <b>${(c.stars||0).toFixed(1)}</b></div>
         <div class="why">${esc(c.why||'')}</div>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
-        ${(c.posted||[]).length?`<div class="postedb">✓ Posted ${c.posted.length}× (${[...new Set(c.posted)].map(x=>x.split(' ')[0]).join(', ')})</div>`:''}
+        ${platRow(c)}
         ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
@@ -3003,7 +3014,7 @@ async function loadClips(){
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
       </div>`).join('')}</div></div>`).join('');
-  markBusy();
+  markBusy(); tickTimers();
 }
 function starStr(n){n=n||0;let s='';for(let i=1;i<=5;i++)s+=n>=i?'★':n>=i-.5?'⯪':'☆';return s}
 /* ---------- review: watch, keep or drop, delete the rest ---------- */
@@ -3122,17 +3133,15 @@ async function planGroup(gi){
 }
 function parseWins(t){return t.split(',').map(x=>x.trim().match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/))
   .filter(Boolean).map(m=>[+m[1]*60+ +m[2], +m[3]*60+ +m[4]])}
-function buildPlan(){
+const groupCamp=g=>{const key=g.clips[0]?g.clips[0].path.split('/')[0]:'_'; return camps[key.replace(/~/g,'/')]||{}};
+function computePlan(g){
   const wins=parseWins(plSet.plan_windows||''), gap=(+plSet.plan_gap||2)*60, perDay=+plSet.plan_per_day||3;
-  const key=plGroup.clips[0]?plGroup.clips[0].path.split('/')[0]:'_';
-  const camp=camps[key.replace(/~/g,'/')]||{};
+  const camp=groupCamp(g);
   let plats=(camp.platforms&&camp.platforms.length?camp.platforms:['TikTok','Instagram Reels','YouTube Shorts','X'])
     .filter(p=>(plSet.my_platforms||[]).includes(p));
-  if(!wins.length){$('#pllist').innerHTML='<div class="empty">Add the times you\'re free above.</div>';return}
-  if(!plats.length){$('#pllist').innerHTML='<div class="empty">None of your accounts match this campaign\'s platforms ('+
-    (camp.platforms||[]).map(p=>PL_SHORT[p]).join(', ')+'). Tick your accounts above.</div>';return}
+  if(!wins.length||!plats.length) return {camp,plats,wins};
   // what to post: best clips first, each platform it isn't on yet, max 5 posts per clip
-  const all=[...plGroup.clips].sort((a,b)=>(b.stars||0)-(a.stars||0));
+  const all=[...g.clips].sort((a,b)=>(b.stars||0)-(a.stars||0));
   const clips=all.filter(c=>(c.stars||0)>=2), low=all.length-clips.length;
   const items=[]; const maxRound=plats.length;
   for(let r=0;r<maxRound;r++) for(const c of clips){
@@ -3140,21 +3149,32 @@ function buildPlan(){
     const n=done.length+items.filter(i=>i.c===c).length;
     if(todo[r]&&n<5) items.push({c,p:todo[r]});
   }
-  // free slots for the next 7 days
-  const now=new Date(), start=new Date(now.getTime()+10*60000), slots=[];
+  // free slots for the next 7 days (the current half-hour counts as "now")
+  const now=new Date(), start=new Date(now.getTime()-29*60000), slots=[];
   for(let d=0;d<7;d++){const day=new Date(now.getFullYear(),now.getMonth(),now.getDate()+d);
     for(const [a,b] of wins) for(let m=a;m<=b;m+=30){const t=new Date(day.getTime()+m*60000); if(t>start)slots.push(t)}}
   slots.sort((x,y)=>x-y);
-  const last={}, perDayCount={}; plRows=[];
+  // real posts so far: keep the gap after the last one on each platform, count today's
+  const last={}, perDayCount={}, rows=[];
+  lastGroups.forEach(gg=>gg.clips.forEach(c=>(c.posts||[]).forEach(p=>{const t=new Date(p.posted*1000);
+    if(!last[p.platform]||t>last[p.platform])last[p.platform]=t;
+    const dk=t.toDateString()+p.platform; perDayCount[dk]=(perDayCount[dk]||0)+1})));
   for(const it of items){
     const s=slots.find(t=>{const dk=t.toDateString()+it.p;
       return (perDayCount[dk]||0)<perDay && (!last[it.p]||t-last[it.p]>=gap*60000)});
     if(!s)continue;
     last[it.p]=s; const dk=s.toDateString()+it.p; perDayCount[dk]=(perDayCount[dk]||0)+1;
-    plRows.push({t:s,p:it.p,c:it.c});
+    rows.push({t:s<now?now:s,p:it.p,c:it.c});
   }
-  plRows.sort((a,b)=>a.t-b.t);
-  const skipped=items.length-plRows.length;
+  rows.sort((a,b)=>a.t-b.t);
+  return {camp,plats,wins,rows,low,perDay,skipped:items.length-rows.length};
+}
+function buildPlan(){
+  const pl=computePlan(plGroup), camp=pl.camp, plats=pl.plats, perDay=pl.perDay, low=pl.low, skipped=pl.skipped;
+  if(!pl.wins.length){$('#pllist').innerHTML='<div class="empty">Add the times you\'re free above.</div>';return}
+  if(!plats.length){$('#pllist').innerHTML='<div class="empty">None of your accounts match this campaign\'s platforms ('+
+    (camp.platforms||[]).map(p=>PL_SHORT[p]).join(', ')+'). Tick your accounts above.</div>';return}
+  plRows=pl.rows;
   $('#plinfo').innerHTML=`${plRows.length} post${plRows.length===1?'':'s'} planned on ${plats.map(p=>PL_SHORT[p]).join(' & ')}, best clips first, `+
     `max ${perDay} a day per platform, ${plSet.plan_gap}h apart.`+(skipped?` ${skipped} didn't fit in the next 7 days.`:'')+
     (low?` ${low} clip${low>1?'s':''} rated under 2★ left out.`:'')+
@@ -3170,6 +3190,41 @@ function buildPlan(){
       <button class="small" onclick="plPosted(${i})">✓ Posted</button></div>`});
   $('#pllist').innerHTML=html||'<div class="empty">Nothing left to post from this batch 🎉</div>';
 }
+/* ---------- platform chips under each clip: when to post, then a timer to submit the link ---------- */
+const SUBMIT_MIN=30;
+let dueAt={};
+function whenTxt(t){const d=Math.round((new Date(t.toDateString())-new Date(new Date().toDateString()))/864e5);
+  const hm=t.toTimeString().slice(0,5);
+  return d===0?hm:d===1?'tmrw '+hm:t.toLocaleDateString([], {weekday:'short'})+' '+hm}
+function platRow(c){
+  const g=lastGroups.find(g=>g.clips.includes(c)); const camp=g?groupCamp(g):{};
+  const plats=camp.platforms||[]; if(!plats.length) return '';
+  const q=esc(c.path).replace(/'/g,"\\'");
+  return '<div class="plats">'+plats.map(p=>{
+    const name=PL_SHORT[p]||p, post=(c.posts||[]).find(x=>x.platform===p);
+    if(post&&post.url) return `<button class="pt done" title="Posted and link saved"><b>✓ ${name}</b>done</button>`;
+    if(post){const until=(post.posted+SUBMIT_MIN*60)*1000;
+      return `<button class="pt timer" data-until="${until}" onclick="addLink('${post.id}','${name}')" title="Submit the link on Whop, then tap to save it here"><b>${name}</b><span>submit link</span></button>`}
+    if(!(plSet.my_platforms||[]).includes(p))
+      return `<button class="pt off" title="This campaign pays on ${name}, but you haven't ticked it as one of your accounts (🗓 Plan)"><b>${name}</b>no account</button>`;
+    const t=dueAt[c.path+'|'+p], soon=t&&t-Date.now()<30*60000;
+    return `<button class="pt ${soon?'now':''}" onclick="markPosted('${q}','${p}')" title="Tap after you've posted it on ${name} - starts the ${SUBMIT_MIN}-minute timer"><b>${name}</b>${t?(soon?'post now':whenTxt(t)):'any time'}</button>`
+  }).join('')+'</div>';
+}
+async function markPosted(path,plat){
+  if(!confirm(`Posted this clip on ${PL_SHORT[plat]}?\n\nThis starts a ${SUBMIT_MIN}-minute timer to submit the link on Whop.`))return;
+  const r=await api('/api/results/add',{clip:path,platform:plat,url:''}); if(r.error){alert(r.error);return}
+  loadClips();
+}
+async function addLink(id,name){
+  const url=prompt(`Paste the ${name} post link (and submit it on Whop too):`); if(!url||!url.trim())return;
+  await api('/api/results/update',{id,url:url.trim()}); loadClips();
+}
+function tickTimers(){document.querySelectorAll('.pt[data-until]').forEach(el=>{
+  const left=Math.round((+el.dataset.until-Date.now())/1000), sp=el.querySelector('span');
+  if(left>0){sp.textContent=`⏱ ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')} to submit`;el.classList.remove('late')}
+  else{sp.textContent='⚠ link overdue';el.classList.add('late')}})}
+setInterval(tickTimers,1000);
 function plPosted(i){const r=plRows[i]; logPost(r.c.path,r.c.name); $('#pd_plat').value=r.p;
   $('#plr'+i).classList.add('done')}
 $('#plsave').onclick=async()=>{
@@ -3526,9 +3581,11 @@ def serve_ui(args):
 
     def clip_groups():
         groups = {}
-        posted_count = {}
+        posted_count, post_info = {}, {}
         for p in load_results().get("posts", []):
             posted_count.setdefault(p.get("clip"), []).append(p.get("platform"))
+            post_info.setdefault(p.get("clip"), []).append({"id": p.get("id"), "platform": p.get("platform"),
+                                                            "url": bool(p.get("url")), "posted": p.get("posted", 0)})
         for key, (root, label) in roots().items():
             if not root.is_dir():
                 continue
@@ -3551,6 +3608,7 @@ def serve_ui(args):
                      "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
                      "manual": camp.get("manual_checks") or [],
                      "posted": posted_count.get(f"{key}/{rel.as_posix()}", []),
+                     "posts": post_info.get(f"{key}/{rel.as_posix()}", []),
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
         for name, clips in groups.items():
