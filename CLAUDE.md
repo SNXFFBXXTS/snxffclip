@@ -58,7 +58,9 @@ for each step:
 - `campaigns/` – the user's campaigns, footage and clips (**git-ignored, never commit**)
 - `settings.json` – AI settings incl. an API key (**git-ignored, never commit or print the key**)
 - `background-songs/`, `fonts/` – user files (git-ignored)
-- `~/.cache/clipper/` – downloads, transcripts, thumbnails, `history.json`, `results.json`
+- `results.json` – posts the user logged (link, platform, views); used for the Results tab and to learn
+  which clips get views (**git-ignored, keep it**)
+- `~/.cache/clipper/` – downloads, transcripts, thumbnails, `history.json`
 
 ## Working on the code
 

@@ -16,3 +16,5 @@ __pycache__/
 fonts/*
 !fonts/.gitkeep
 settings.json
+results.json
+results.tmp

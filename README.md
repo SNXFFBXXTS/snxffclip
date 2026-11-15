@@ -101,6 +101,12 @@ gets done, with the number of clips based on its length (about one per 2½ minut
 Short videos still give you the number of clips you asked for – extra clips overlap but open on a different line.
 Each run also writes a `clips.txt` you can edit and re-run with `--list clips.txt`.
 
+### Ratings and results
+Every clip gets ★ 1–5 (moment strength, the campaign's pay rate, sound, keywords, warnings, and what has
+done well for you before) and clips are sorted best first. After posting, press 📊 on a clip to log the
+link; update the views in the **📈 Results** tab every few days. Results shows totals, rough earnings,
+campaigns, and what's working – and once 6 posts have views, clipper leans towards clips like your best ones.
+
 ### Pre-flight checks
 Every clip shows ⚠ warnings before you post: no sound, shorter than the campaign minimum, over 3 minutes,
 caption not from the approved list, missing @tag or #ad, doesn't mention the campaign's keywords, or made

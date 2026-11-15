@@ -1423,9 +1423,58 @@ def rate_clip(f: Path, c=None, checks=None, learn=None, rank=None):
     return stars, ", ".join(why[:4]).capitalize()
 
 
+RESULTS_FILE = Path(__file__).resolve().parent / "results.json"
+
+
+def load_results():
+    try:
+        d = json.loads(RESULTS_FILE.read_text())
+        return d if isinstance(d, dict) else {"posts": []}
+    except (OSError, ValueError):
+        return {"posts": []}
+
+
+def save_results(d):
+    tmp = RESULTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    os.replace(tmp, RESULTS_FILE)
+
+
+def len_bucket(sec):
+    return "short" if sec <= 22 else "medium" if sec <= 40 else "long"
+
+
+def load_learning():
+    """What has done well so far: average views per kind of clip. None until there's enough data."""
+    posts = [p for p in load_results().get("posts", []) if p.get("views") is not None]
+    if len(posts) < 6:
+        return None
+    avg = sum(p["views"] for p in posts) / len(posts) or 1
+    buckets = {}
+    for p in posts:
+        m = p.get("meta") or {}
+        for key in (f"len:{len_bucket(m.get('len', 30))}", f"kind:{'visual' if m.get('visual') else 'speech'}"):
+            buckets.setdefault(key, []).append(p["views"])
+    return {"avg": avg, "n": len(posts),
+            "b": {k: (sum(v) / len(v), len(v)) for k, v in buckets.items() if len(v) >= 3}}
+
+
 def learn_bonus(learn, meta, dur):
-    """Placeholder until results are recorded (see results tracker)."""
-    return 0.0, ""
+    """Small push up (or down) for clips like the ones that got views before."""
+    import math
+    if not learn:
+        return 0.0, ""
+    bonus, notes = 0.0, []
+    for key, label in ((f"len:{len_bucket(meta.get('len', dur or 30))}", "{} clips"),
+                       (f"kind:{'visual' if meta.get('visual') else 'speech'}",
+                        "{} clips")):
+        if key in learn["b"]:
+            avg, n = learn["b"][key]
+            b = max(-0.35, min(0.35, math.log2(max(avg, 1) / learn["avg"]) * 0.3))
+            bonus += b
+            if b > 0.12:
+                notes.append(label.format(key.split(":")[1]))
+    return bonus, (f"your {' & '.join(notes)} do well" if notes else "")
 
 
 def campaign_checks(cid):
@@ -1548,6 +1597,11 @@ def find_moments(src, args, lo, hi, target):
         if not cands:
             die("video too short to use")
         print(f"  no real speech - picking by movement and sound ({len(cands)} options)")
+        learn = load_learning()
+        if learn:
+            for c in cands:
+                c["score"] += learn_bonus(learn, {"len": c["end"] - c["start"], "visual": True}, 0)[0] * 2
+            cands.sort(key=lambda c: c["score"], reverse=True)
         return segs, cands
     loud = loudness_curve(src)
     cands = build_candidates(segs, lo, hi, target)
@@ -1565,6 +1619,12 @@ def find_moments(src, args, lo, hi, target):
             hits += bool(n)
         cands.sort(key=lambda c: c["score"], reverse=True)
         print(f"  {hits} possible clips mention: {', '.join(kws)}")
+    learn = load_learning()
+    if learn:                                        # lean towards what has got views before
+        for c in cands:
+            b, _ = learn_bonus(learn, {"len": c["end"] - c["start"], "visual": c.get("visual")}, 0)
+            c["score"] += b * 2
+        cands.sort(key=lambda c: c["score"], reverse=True)
     return segs, cands
 
 
@@ -1867,6 +1927,17 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.rstats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.rstat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;text-align:center}
+.rstat b{display:block;font-size:20px}.rstat span{font-size:11px;color:var(--dim)}
+.rtable{width:100%;border-collapse:collapse;font-size:13px}
+.rtable td,.rtable th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+.rtable th{color:var(--dim);font-weight:500;font-size:11.5px}
+.rtable a,#pdlist a{color:var(--acc2)}
+.rtable input{width:80px;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
+.rtable tr.stale input{border-color:#ffb03d}
+.rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
+.postedb{padding:2px 8px 0;font-size:11px;color:var(--ok)}
 .stars{padding:7px 8px 0;color:#ffcf3d;font-size:14px;letter-spacing:1px}.stars b{color:var(--text);font-size:12px;letter-spacing:0}
 .why{padding:1px 8px 0;font-size:11px;color:var(--dim)}
 .readybar{display:flex;gap:10px;align-items:center;background:#123726;border:1px solid var(--ok);border-radius:14px;
@@ -2129,7 +2200,21 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 </dialog>
 
 <div class="tabs"><button type="button" class="tab on" data-t="jobs">Jobs</button>
-  <button type="button" class="tab" data-t="history">History</button></div>
+  <button type="button" class="tab" data-t="history">History</button>
+  <button type="button" class="tab" data-t="results">📈 Results</button></div>
+<div id="results" style="display:none"></div>
+<dialog id="pdlg" class="cdlg">
+ <div class="cdhead"><b id="pdtitle">Log a post</b><button type="button" class="small" onclick="$('#pdlg').close()">✕</button></div>
+ <div id="pdlist" style="margin-top:8px"></div>
+ <div class="cdgrid" style="margin-top:10px">
+   <label>Platform<select id="pd_plat"><option>TikTok</option><option>Instagram Reels</option><option>YouTube Shorts</option><option>X</option></select></label>
+   <label>Views so far<input type="text" id="pd_views" placeholder="0"></label>
+   <label class="wide">Link to the post<input type="text" id="pd_url" placeholder="https://www.tiktok.com/@…/video/…"></label>
+   <label>Likes<input type="text" id="pd_likes" placeholder="optional"></label>
+ </div>
+ <button type="button" class="go" id="pdadd">＋ Log this post</button>
+ <div class="s" style="font-size:12px;color:var(--dim);margin-top:8px">Come back after a few days and update the views in 📈 Results - clipper learns which clips get views.</div>
+</dialog>
 <div id="jobs"><div class="empty">Nothing running</div></div>
 <div id="history" style="display:none"></div>
 
@@ -2540,10 +2625,12 @@ async function loadClips(){
         <div class="stars" title="${esc(c.why||'')}">${starStr(c.stars)} <b>${(c.stars||0).toFixed(1)}</b></div>
         <div class="why">${esc(c.why||'')}</div>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
+        ${(c.posted||[]).length?`<div class="postedb">✓ Posted ${c.posted.length}× (${[...new Set(c.posted)].map(x=>x.split(' ')[0]).join(', ')})</div>`:''}
         ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
+          <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
       </div>`).join('')}</div></div>`).join('');
   markBusy();
@@ -2590,8 +2677,8 @@ $('#rvdone').onclick=async()=>{
 /* ---------- tabs + history ---------- */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
-  $('#jobs').style.display=b.dataset.t==='jobs'?'':'none'; $('#history').style.display=b.dataset.t==='history'?'':'none';
-  if(b.dataset.t==='history')loadHistory();
+  ['jobs','history','results'].forEach(t=>$('#'+t).style.display=b.dataset.t===t?'':'none');
+  if(b.dataset.t==='history')loadHistory(); if(b.dataset.t==='results')loadResults();
 });
 async function loadHistory(){
   const h=await api('/api/history'), el=$('#history');
@@ -2606,6 +2693,47 @@ async function loadHistory(){
     '<button type="button" class="small" onclick="clearHistory()">Clear history</button>';
 }
 async function clearHistory(){if(!confirm('Clear the whole history?'))return;await api('/api/history/clear',{});loadHistory()}
+
+/* ---------- results ---------- */
+let pdClip='';
+const fmtN=n=>n==null?'–':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
+async function logPost(path,name){
+  pdClip=path; $('#pdtitle').textContent='Log a post · '+name; $('#pd_url').value='';$('#pd_views').value='';$('#pd_likes').value='';
+  const r=await api('/api/results'), mine=r.posts.filter(p=>p.clip===path);
+  $('#pdlist').innerHTML=mine.length?'<div class="s" style="font-size:12px;color:var(--dim)">Already logged:</div>'+
+    mine.map(p=>`<div style="font-size:13px">${esc(p.platform)} · ${fmtN(p.views)} views ${p.url?`· <a href="${esc(p.url)}" target="_blank">link</a>`:''}</div>`).join('')
+    +(mine.length>=4?`<div style="color:#ffb03d;font-size:12px">⚠ ${mine.length} posts - the limit is usually 5</div>`:''):'';
+  $('#pdlg').showModal();
+}
+$('#pdadd').onclick=async()=>{
+  const r=await api('/api/results/add',{clip:pdClip,platform:$('#pd_plat').value,url:$('#pd_url').value,views:$('#pd_views').value,likes:$('#pd_likes').value});
+  if(r.error){alert(r.error);return} $('#pdlg').close(); loadClips(); if($('#results').style.display!=='none')loadResults();
+};
+async function loadResults(){
+  const r=await api('/api/results'), el=$('#results'), t=r.total;
+  if(!t.posts){el.innerHTML='<div class="empty">No posts logged yet.<br>After posting a clip, press 📊 on it to log the link - then update the views here every few days.</div>';return}
+  el.innerHTML=`<div class="rstats"><div class="rstat"><b>${t.posts}</b><span>posts</span></div>
+    <div class="rstat"><b>${fmtN(t.views)}</b><span>views</span></div>
+    <div class="rstat"><b>$${t.earn.toFixed(2)}</b><span>rough earnings*</span></div></div>
+    ${t.stale?`<div style="color:#ffb03d;font-size:13px;margin-bottom:8px">⚠ ${t.stale} post${t.stale>1?'s haven\'t':' hasn\'t'} had views updated for 3+ days</div>`:''}
+    <div class="rsec">What's working</div>
+    ${r.learning?r.insights.map(i=>`<div style="font-size:13px">${i.vs>=1?'📈':'📉'} ${esc(i.what)}: ${fmtN(i.avg)} views on average (${i.n} posts, ${i.vs}× your average)</div>`).join('')
+      :`<div style="font-size:13px;color:var(--dim)">Log views on ${r.need} more post${r.need===1?'':'s'} and clipper starts learning what gets views.</div>`}
+    <div class="rsec">Campaigns</div>
+    <table class="rtable"><tr><th>Campaign</th><th>Posts</th><th>Views</th><th>Est.</th></tr>
+    ${r.campaigns.map(c=>`<tr><td>${esc(c.name)}</td><td>${c.posts}</td><td>${fmtN(c.views)}</td><td>${c.rate?'$'+c.earn.toFixed(2):'<span style="color:var(--dim)">set pay rate</span>'}</td></tr>`).join('')}</table>
+    <div class="rsec">Posts</div>
+    <table class="rtable"><tr><th>Clip</th><th>Where</th><th>Views</th><th>Likes</th><th></th></tr>
+    ${r.posts.map(p=>{const stale=Date.now()/1000-p.updated>3*86400;
+      return `<tr class="${stale?'stale':''}"><td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.clip_name)}">${p.url?`<a href="${esc(p.url)}" target="_blank">${esc(p.clip_name)}</a>`:esc(p.clip_name)}</td>
+      <td>${esc(p.platform.split(' ')[0])}</td>
+      <td><input value="${p.views??''}" data-id="${p.id}" data-k="views" onchange="updPost(this)"></td>
+      <td><input value="${p.likes??''}" data-id="${p.id}" data-k="likes" onchange="updPost(this)" style="width:60px"></td>
+      <td><button class="small" onclick="delPost('${p.id}')">✕</button></td></tr>`}).join('')}</table>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px">* views ÷ 1,000 × the campaign's pay rate. Ignores minimum payouts, caps and fees, so it's a rough guide.</div>`;
+}
+async function updPost(inp){await api('/api/results/update',{id:inp.dataset.id,[inp.dataset.k]:inp.value});inp.style.borderColor='var(--ok)'}
+async function delPost(id){if(!confirm('Remove this post from your results?'))return;await api('/api/results/delete',{id});loadResults();loadClips()}
 
 async function del(p){
   if(!confirm('Delete this clip?'))return;
@@ -2857,7 +2985,34 @@ def serve_ui(args):
 
     # ---------- helpers ----------
     def learn_data():
-        return None                                   # filled in by the results tracker
+        return load_learning()
+
+    res_lock = threading.Lock()
+
+    def results_summary():
+        posts = load_results().get("posts", [])
+        est = lambda p: (p.get("views") or 0) / 1000 * float(p.get("rate") or 0)
+        camps = {}
+        for p in posts:
+            k = p.get("campaign_name") or p.get("campaign") or "No campaign"
+            c = camps.setdefault(k, {"name": k, "posts": 0, "views": 0, "earn": 0.0, "rate": p.get("rate")})
+            c["posts"] += 1
+            c["views"] += p.get("views") or 0
+            c["earn"] += est(p)
+        learn = load_learning()
+        insights = []
+        if learn:
+            for key, (avg, n) in sorted(learn["b"].items(), key=lambda kv: -kv[1][0]):
+                insights.append({"what": key.split(":")[1] + (" clips" if key.startswith("len") else
+                                                              " (product shots)" if key.endswith("visual") else " (talking)"),
+                                 "avg": round(avg), "n": n, "vs": round(avg / learn["avg"], 2)})
+        return {"posts": sorted(posts, key=lambda p: -p.get("posted", 0)),
+                "total": {"posts": len(posts), "views": sum(p.get("views") or 0 for p in posts),
+                          "earn": round(sum(est(p) for p in posts), 2),
+                          "stale": sum(1 for p in posts if time.time() - p.get("updated", 0) > 3 * 86400)},
+                "campaigns": sorted(camps.values(), key=lambda c: -c["views"]),
+                "insights": insights, "learning": bool(learn),
+                "need": max(0, 6 - sum(1 for p in posts if p.get("views") is not None))}
 
     def version_info(fetch=False):
         repo = Path(__file__).resolve().parent
@@ -2908,6 +3063,9 @@ def serve_ui(args):
 
     def clip_groups():
         groups = {}
+        posted_count = {}
+        for p in load_results().get("posts", []):
+            posted_count.setdefault(p.get("clip"), []).append(p.get("platform"))
         for key, (root, label) in roots().items():
             if not root.is_dir():
                 continue
@@ -2928,6 +3086,7 @@ def serve_ui(args):
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
                      "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
                      "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
+                     "posted": posted_count.get(f"{key}/{rel.as_posix()}", []),
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
         for name, clips in groups.items():
@@ -3085,6 +3244,8 @@ def serve_ui(args):
             elif u.path == "/api/jobs":
                 with lock:
                     self.send_json([public(jobs[i]) for i in reversed(order)])
+            elif u.path == "/api/results":
+                self.send_json(results_summary())
             elif u.path == "/api/version":
                 self.send_json(version_info(fetch="fetch" in parse_qs(u.query)))
             elif u.path == "/api/settings":
@@ -3228,6 +3389,55 @@ def serve_ui(args):
                     srv.server_close()
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 threading.Thread(target=restart, daemon=True).start()
+            elif u.path in ("/api/results/add", "/api/results/update", "/api/results/delete"):
+                with res_lock:
+                    data = load_results()
+                    posts = data.setdefault("posts", [])
+                    num = lambda v: (int(str(v).replace(",", "").strip()) if str(v or "").replace(",", "").strip().isdigit()
+                                     else None)
+                    if u.path.endswith("add"):
+                        rel = str(d.get("clip") or "")
+                        f = safe(rel)
+                        side, camp = {}, {}
+                        if f:
+                            try:
+                                side = json.loads(f.with_suffix(".clip.json").read_text())
+                            except (OSError, ValueError):
+                                side = {}
+                        cid = rel.split("/")[0].replace("~", "/") if "/" in rel else ""
+                        if cid and cid != "_":
+                            try:
+                                camp = json.loads((campaign_dir(cid) / "campaign.json").read_text())
+                            except (OSError, ValueError):
+                                camp = {}
+                        plat = d.get("platform") if d.get("platform") in ("TikTok", "Instagram Reels", "YouTube Shorts", "X") else "TikTok"
+                        url = str(d.get("url") or "").strip()[:400]
+                        same = [x for x in posts if x.get("clip") == rel]
+                        if len(same) >= 5:
+                            return self.send_json({"error": "This clip has already been posted 5 times - campaigns don't allow more"}, 400)
+                        meta = dict(side.get("meta") or {})
+                        meta["style"] = (side.get("style") or {}).get("preset")
+                        posts.append({"id": uuid.uuid4().hex[:10], "clip": rel,
+                                      "clip_name": Path(rel).stem, "campaign": cid if cid != "_" else "",
+                                      "campaign_name": camp.get("name", ""), "rate": camp.get("rate"),
+                                      "platform": plat, "url": url, "posted": time.time(),
+                                      "views": num(d.get("views")), "likes": num(d.get("likes")),
+                                      "updated": time.time(), "meta": meta})
+                    else:
+                        x = next((x for x in posts if x.get("id") == d.get("id")), None)
+                        if not x:
+                            return self.send_json({"error": "Not found"}, 404)
+                        if u.path.endswith("delete"):
+                            posts.remove(x)
+                        else:
+                            for k in ("views", "likes"):
+                                if str(d.get(k, "")).strip() != "":
+                                    x[k] = num(d.get(k))
+                            if d.get("url") is not None:
+                                x["url"] = str(d["url"]).strip()[:400]
+                            x["updated"] = time.time()
+                    save_results(data)
+                self.send_json(results_summary())
             elif u.path == "/api/aitest":
                 name = ai_name()
                 if not name:
