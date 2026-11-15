@@ -2377,6 +2377,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0f13">
 <title>Clipper</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>👽</text></svg>">
 <script>try{var t=localStorage.getItem('clipper_theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 <style>
 :root{--field:#0b0c10;--acc3:#ff6a3d;--bg:#0e0f13;--card:#181a21;--line:#262934;--text:#eceef3;--dim:#8b90a0;--acc:#ff3d6e;--acc2:#ffb03d;--ok:#3ddc97}
@@ -2605,7 +2606,7 @@ html[data-theme=sharks] pre{color:#7fd8d4}
 html[data-theme=sharks] .pt.now{border-color:var(--acc2);color:var(--acc2)}
 html[data-theme=sharks] .pt.timer{border-color:var(--acc);color:var(--acc)}
 </style></head><body>
-<h1>✂️ <span>Clipper</span>
+<h1>👽 <span>Clipper</span>
   <select id="themepick" class="themepick" title="Theme" style="margin-left:auto">
     <option value="">Woke as fuck</option><option value="sharks">San Jose Sharks</option></select>
   <button type="button" class="small" id="updbtn" title="Get the latest clipper from GitHub">⟳ Update</button>
