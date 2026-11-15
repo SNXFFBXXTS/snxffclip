@@ -79,6 +79,61 @@ def run(cmd):
         die("command failed: " + " ".join(map(str, cmd[:4])) + " ...")
 
 
+# ---------- graphics card for video (NVENC encode / NVDEC decode) ----------
+_HW = {}
+
+
+def gpu_video():
+    """True if ffmpeg can encode with the NVIDIA card (checked once).
+    Set CLIPPER_CPU_VIDEO=1 to force the CPU."""
+    if "ok" not in _HW:
+        ok = False
+        if not os.environ.get("CLIPPER_CPU_VIDEO") and shutil.which("nvidia-smi"):
+            r = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+                                "color=black:s=320x240:d=0.3", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                               capture_output=True)
+            ok = r.returncode == 0
+        _HW["ok"] = ok
+    return _HW["ok"]
+
+
+def gpu_cmd(cmd, decode=True):
+    """Turn a CPU ffmpeg command into one that decodes + encodes on the graphics card."""
+    out, i, first = [], 0, decode
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "-i" and first:                       # decode the main video on the card
+            out += ["-hwaccel", "cuda"]
+            first = False
+        if c == "-c:v" and i + 1 < len(cmd) and cmd[i + 1] == "libx264":
+            crf = "20"
+            j = i + 2
+            while j + 1 < len(cmd) and cmd[j] in ("-preset", "-crf"):
+                if cmd[j] == "-crf":
+                    crf = cmd[j + 1]
+                j += 2
+            out += ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(int(crf) + 3),
+                    "-b:v", "0", "-maxrate", "20M", "-bufsize", "40M"]
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return out
+
+
+def ff(cmd):
+    """Run an ffmpeg command on the graphics card if possible, else (or on failure) the CPU."""
+    if gpu_video():
+        if not _HW.get("nodec") and subprocess.run(gpu_cmd(cmd)).returncode == 0:
+            return
+        _HW["nodec"] = True                       # card can't decode this: encode only
+        if subprocess.run(gpu_cmd(cmd, decode=False)).returncode == 0:
+            return
+        print("  ! graphics card couldn't make this video - using the CPU instead")
+        _HW["ok"] = False
+    run(cmd)
+
+
 def need(tool):
     if not shutil.which(tool):
         die(f"'{tool}' not found - install it with: sudo pacman -S {tool}")
@@ -111,6 +166,9 @@ def download_full(url):
     return path, title
 
 
+CAP_RES = "scale='if(gt(iw,ih),-2,min(iw,1440))':'if(gt(iw,ih),min(ih,1440),-2)'"
+
+
 def fetch_segment(src, start, end, tmp: Path) -> Path:
     """Get just start..end as an mp4 in tmp."""
     out = tmp / "raw.mp4"
@@ -122,8 +180,9 @@ def fetch_segment(src, start, end, tmp: Path) -> Path:
     else:
         if not Path(src).exists():
             die(f"file not found: {src}")
-        run(["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-             "-i", str(src), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        # 4K is far more than a 1080x1920 short needs: cap the short side at 1440
+        ff(["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+             "-i", str(src), "-vf", CAP_RES, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
              "-c:a", "aac", "-b:a", "192k", str(out)])
     if not out.exists():
         die("couldn't get the video segment")
@@ -179,8 +238,10 @@ def gpu_status():
                             "import sys; sys.path.insert(0, %r); import clipper; print(clipper.preload_cuda())"
                             % str(Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=120)
         st["ready"] = r.stdout.strip().endswith("True")
+    st["video"] = st["driver"] and gpu_video()
     if st["ready"]:
-        st["msg"] = f"✅ Using your graphics card ({st['gpu'].split(',')[0]}) - transcription is much faster"
+        st["msg"] = (f"✅ Using your graphics card ({st['gpu'].split(',')[0]}) - transcription is much faster"
+                     + (", and it makes the clips too" if st["video"] else ""))
     elif not st["driver"]:
         st["msg"] = ("No NVIDIA driver found (nvidia-smi doesn't work). Install the right NVIDIA driver for your card "
                      "first - ask Claude Code: \"install the NVIDIA driver for my GTX 1050 Ti on EndeavourOS\".")
@@ -863,7 +924,7 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
         amap = "[a]"
     if logo and Path(logo).is_file():
         inputs += ["-loop", "1", "-i", str(logo)]
-    run(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
+    ff(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
          "-filter_complex", v, "-map", "[v]", "-map", amap,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", "-f", "mp4", str(out)])
@@ -940,7 +1001,7 @@ def mix_broll(raw: Path, inserts, tmp: Path) -> Path:
         graph.append(f"[{prev}][b{k}]overlay=enable='between(t,{at:.3f},{at + dur:.3f})':eof_action=pass[v{k}]")
         prev = f"v{k}"
     out = tmp / "mixed.mp4"
-    run(["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph),
+    ff(["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph),
          "-map", f"[{prev}]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
          "-c:a", "copy", str(out)])
     return out
@@ -1756,10 +1817,27 @@ def write_campaign_files(c, folder, picks, ollama=None):
 def motion_curve(path: Path):
     """How much the picture changes every HOP seconds (0..1), plus scene-cut times."""
     import numpy as np
+    st = path.stat()
+    key = hashlib.md5(f"{path.resolve()}|{st.st_size}|{st.st_mtime}|{HOP}".encode()).hexdigest()
+    cf = CACHE / "motion" / f"{key}.json"
+    if cf.is_file():
+        try:
+            d = json.loads(cf.read_text())
+            print("  using cached movement scan")
+            return np.array(d["diff"]), d["cuts"]
+        except (ValueError, KeyError):
+            pass
+    print("  scanning for movement and scene cuts (no real speech)...", flush=True)
     fps = 1 / HOP
-    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vf",
-                        f"fps={fps:g},scale=64:36,format=gray", "-f", "rawvideo", "-"],
-                       capture_output=True)
+    cmd = ["ffmpeg", "-loglevel", "error", "-i", str(path), "-an", "-vf",
+           f"fps={fps:g},scale=64:36,format=gray", "-f", "rawvideo", "-"]
+    r = None
+    if gpu_video():
+        r = subprocess.run(gpu_cmd(cmd), capture_output=True)
+        if r.returncode != 0 or not r.stdout:
+            r = None
+    if r is None:
+        r = subprocess.run(cmd, capture_output=True)
     a = np.frombuffer(r.stdout, dtype=np.uint8)
     n = a.size // (64 * 36)
     if n < 2:
@@ -1768,6 +1846,11 @@ def motion_curve(path: Path):
     diff = np.concatenate([[0.0], np.abs(np.diff(f, axis=0)).mean(axis=(1, 2)) / 255])
     thr = diff.mean() + 2.5 * diff.std()
     cuts = [i * HOP for i in range(1, n) if diff[i] > max(thr, 0.08)]
+    try:
+        cf.parent.mkdir(parents=True, exist_ok=True)
+        cf.write_text(json.dumps({"diff": [round(float(x), 5) for x in diff], "cuts": cuts}))
+    except OSError:
+        pass
     return diff, cuts
 
 
