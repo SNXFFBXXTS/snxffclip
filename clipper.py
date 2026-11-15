@@ -895,6 +895,17 @@ def auto_mode(args):
     if not cands:
         die(f"no {args.len}s windows found - try a different --len")
     cands = score_candidates(cands, segs, loud)
+    camp = getattr(args, "campaign_data", None)
+    kws = [k.lower() for k in (camp or {}).get("keywords", []) if k]
+    if kws:
+        hits = 0
+        for c in cands:
+            n = sum(1 for k in kws if re.search(r"\b" + re.escape(k) + r"\b", c["text"].lower()))
+            c["keyword_hits"] = n
+            c["score"] += 3.0 * min(n, 2)          # strongly prefer clips that say the keywords
+            hits += bool(n)
+        cands.sort(key=lambda c: c["score"], reverse=True)
+        print(f"  {hits} possible clips mention: {', '.join(kws)}")
 
     picks = ollama_pick(cands, args.k, args.ollama) if args.ollama else None
     picks = picks or pick(cands, args.k)

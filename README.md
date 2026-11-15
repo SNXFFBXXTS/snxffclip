@@ -160,6 +160,7 @@ Campaigns aren't included in this repo – make your own. Drop a `something.json
   "disclosure": "#Ad",
   "hashtags": ["#Game", "#Trailer"],
   "max_extra_hashtags": 3,
+  "keywords": ["words", "the clip should mention"],
   "caption_rules": "Guidance for the AI caption writer (used with --ollama)",
   "example_captions": ["Caption idea one", "Caption idea two"],
   "checklist": ["Things to tick off before posting"]
