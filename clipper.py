@@ -3388,6 +3388,7 @@ def main():
     p.add_argument("--cap-pop", choices=["on", "off"], help="pop-in animation on/off")
     p.add_argument("--cap-json", help=argparse.SUPPRESS)
     p.add_argument("--fonts", action="store_true", help="list fonts you can use")
+    p.add_argument("--check", metavar="CAMPAIGN", help="check a campaign's settings against its brief, and its clips")
     p.add_argument("--music", help="background music: a file, or a folder (random track per clip)")
     p.add_argument("--music-vol", type=float, default=0.15, help="music volume 0-1 (default 0.15)")
     p.add_argument("--music-start", type=float, default=0.0, help="start the music N seconds in")
@@ -3398,6 +3399,22 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     need("ffmpeg")
+    if args.check:
+        c = load_campaign(args.check)
+        print(f"Campaign: {c.get('name')}  ({c['id']})")
+        res = campaign_checks(c["id"])
+        for lvl, msg in res:
+            print(f"  {'⚠' if lvl != 'info' else 'ℹ'} {msg}")
+        if not [r for r in res if r[0] != "info"]:
+            print("  ✅ settings match the brief")
+        clips = sorted((campaign_dir(c["id"]) / "clips").rglob("*.mp4"))
+        for f in clips:
+            chk = clip_checks(f, c)
+            st, why = rate_clip(f, c, chk)
+            print(f"  {st:.1f}★ {f.relative_to(campaign_dir(c['id']) / 'clips')}  - {why}")
+            for w in chk:
+                print(f"       ⚠ {w}")
+        return
     if args.fonts:
         print("\n".join(list_fonts()))
         print(f"\nAdd more: put .ttf/.otf files in {FONTS_DIR}")
