@@ -94,6 +94,10 @@ installed, *Set up GPU* adds the CUDA libraries (pip, no sudo) and clipper uses 
 falling back to the CPU if anything's wrong. `./clipper.py --gpu` shows the status and
 `./clipper.py --speedtest some-video.mp4` compares CPU vs GPU on its first minute.
 
+**Silent b-roll + no music allowed:** bulk scrape also makes 2 *mix* clips – the sound and captions of the
+best clips with sound, cutting to silent product shots from the same folder for a few seconds at a time
+(never in the opening hook). `--mix N` sets how many (0 = off).
+
 **Speed:** the web page's Fast / Good / Best use English-only speech models (`base.en`, `small.en`,
 `medium.en`) which are faster and more accurate for English. All CPU cores are used. An NVIDIA card with
 CUDA set up is several times faster again.

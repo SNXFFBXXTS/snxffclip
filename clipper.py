@@ -838,7 +838,7 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", "-f", "mp4", str(out)])
 
 
-def make_clip(src, start, end, out: Path, args, words=None, meta=None):
+def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=None):
     """words given -> reuse transcript; else transcribe the clip if captions wanted."""
     if end <= start:
         die(f"end must be after start ({out.name})")
@@ -846,6 +846,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         raw = fetch_segment(src, start, end, tmp)
+        if broll:
+            raw = mix_broll(raw, broll, tmp)
         win = []                                  # words in source time
         if words is not None:
             win = [tuple(w) for w in words if w[0] >= start - 0.05 and w[1] <= end + 0.05]
@@ -879,8 +881,60 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None):
         except ValueError:
             meta = None
     side["meta"] = meta or {}
+    if broll:
+        side["broll"] = broll
     out.with_suffix(".clip.json").write_text(json.dumps(side))
     print(f"  saved {out}")
+
+
+def mix_broll(raw: Path, inserts, tmp: Path) -> Path:
+    """Keep raw's sound, cut to silent b-roll shots: inserts = [(at, dur, src, src_start)]"""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=width,height,r_frame_rate", "-of", "csv=p=0", str(raw)], capture_output=True, text=True)
+    try:
+        w, h, fr = r.stdout.strip().split(",")[:3]
+        w, h = int(w), int(h)
+        num, den = (fr.split("/") + ["1"])[:2]
+        fps = float(num) / float(den or 1)
+    except ValueError:
+        return raw
+    inputs = ["-i", str(raw)]
+    graph, prev = [], "0:v"
+    for k, (at, dur, bsrc, bstart) in enumerate(inserts, 1):
+        inputs += ["-ss", f"{bstart:.2f}", "-t", f"{dur + 0.5:.2f}", "-i", str(bsrc)]
+        graph.append(f"[{k}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,"
+                     f"fps={fps:.3f},setpts=PTS-STARTPTS+{at:.3f}/TB[b{k}]")
+        graph.append(f"[{prev}][b{k}]overlay=enable='between(t,{at:.3f},{at + dur:.3f})':eof_action=pass[v{k}]")
+        prev = f"v{k}"
+    out = tmp / "mixed.mp4"
+    run(["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph),
+         "-map", f"[{prev}]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+         "-c:a", "copy", str(out)])
+    return out
+
+
+def plan_broll(clip, words, broll_pool, n_start=0):
+    """Pick where to cut to b-roll inside a clip and which silent shots to use."""
+    dur = clip["end"] - clip["start"]
+    n = max(1, min(3, round(dur / 12)))
+    rel = [w[0] - clip["start"] for w in words if clip["start"] <= w[0] <= clip["end"]]
+    inserts = []
+    for i in range(n):
+        target = 2.5 + (dur - 4.5) * (i + 0.5) / n        # spread out, keep the hook and the ending
+        at = min(rel, key=lambda t: abs(t - target)) if rel else target   # cut on a word
+        at = max(2.5, min(at, dur - 4.0))
+        length = min(3.2, dur - 1.5 - at)
+        if length < 1.5 or any(abs(at - a) < 4 for a, *_ in inserts):
+            continue
+        idx = n_start * 3 + len(inserts)
+        b = broll_pool[idx % len(broll_pool)]
+        reuse = idx // len(broll_pool)                    # same shot again? use a later part of it
+        bdur = duration_of(Path(b["src"])) or (b["end"] + 10)
+        bstart = b["start"] + 0.3 + reuse * (length + 0.7)
+        if bstart + length > bdur:
+            bstart = max(0.0, (bstart + length) % max(bdur - length, 1.0))
+        inserts.append((round(at, 2), round(length, 2), b["src"], round(bstart, 2)))
+    return inserts
 
 
 def restyle_mode(args):
@@ -900,7 +954,8 @@ def restyle_mode(args):
     if not is_url(src) and not Path(src).is_file():
         die(f"the original video isn't there any more: {src}")
     print(f"> restyling {clip.name}")
-    make_clip(src, sd["start"], sd["end"], clip, args, [tuple(w) for w in sd.get("words", [])])
+    make_clip(src, sd["start"], sd["end"], clip, args, [tuple(w) for w in sd.get("words", [])],
+              broll=sd.get("broll"))
 
 
 # ======================================================================
@@ -1866,12 +1921,31 @@ def bulk_mode(args):
         per[cd["src"]] = per.get(cd["src"], 0) + 1
         if len(picks) == k:
             break
+    # silent b-roll + no music allowed -> mix it into clips that have sound
+    mixes = []
+    want = args.mix if args.mix is not None else (2 if (c and c.get("music") is False) else 0)
+    if want:
+        silent = {}
+        for cd in pool:
+            if cd.get("visual") and not _probe(Path(cd["src"]))[0]:
+                if cd["src"] not in silent or cd["score"] > silent[cd["src"]]["score"]:
+                    silent[cd["src"]] = cd                 # liveliest bit of each silent video
+        broll_pool = sorted(silent.values(), key=lambda x: -x["score"])
+        bases = [cd for cd in picks if _probe(Path(cd["src"]))[0] and cd["end"] - cd["start"] >= 10]
+        if broll_pool and bases:
+            for i, base in enumerate(bases[:want]):
+                ins = plan_broll(base, words_of.get(base["src"], []), broll_pool, i)
+                if ins:
+                    m = dict(base, mix=True, broll=ins, title=base["title"], score=base["score"] + 0.5)
+                    mixes.append(m)
+            print(f"  + {len(mixes)} mixed clip(s): sound from the best clips, cut with silent product shots")
+    picks = picks + mixes
     out = args.out_dir / f"bulk-scrape-{_t.strftime('%d%b-%H%M')}"
     out.mkdir(parents=True, exist_ok=True)
     lines = [f"# bulk scrape of {folder}", "# best clips across all videos", ""]
     print(f"\n> top {len(picks)} moments:")
     for n, cd in enumerate(picks, 1):
-        cd["name"] = f"{n:02d}-{slug(cd['vid'], 18)}-{slug(cd['title'], 28)}"
+        cd["name"] = f"{n:02d}-{'mix-' if cd.get('mix') else ''}{slug(cd['vid'], 18)}-{slug(cd['title'], 28)}"
         prev = cd["text"][:100] + ("..." if len(cd["text"]) > 100 else "")
         print(f"  {n}. [{cd['vid'][:30]}] {short_ts(cd['start'])}-{short_ts(cd['end'])}  {cd['title']}")
         lines += [f"# {cd['title']}  (score {cd['score']:.2f})  from {cd['vid']}", f"# \"{prev}\"",
@@ -1886,7 +1960,7 @@ def bulk_mode(args):
     print("\n=== rendering ===")
     for cd in picks:
         make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]],
-                  clip_meta(cd))
+                  clip_meta(cd), broll=cd.get("broll"))
     print(f"\ndone - {len(picks)} clips in {out}")
 
 
@@ -3797,6 +3871,8 @@ def main():
     p.add_argument("--batch", action="store_true",
                    help="clip every video in a campaign's source folder (or in the folder you give)")
     p.add_argument("--redo", action="store_true", help="batch: also redo videos that already have clips")
+    p.add_argument("--mix", type=int, default=None,
+                   help="bulk: how many clips to mix with silent b-roll (default 2 when music is banned)")
     p.add_argument("--bulk", action="store_true",
                    help="bulk folder scrape: scan every video, keep the best clips overall")
     p.add_argument("--len", default="20-60", help="auto: clip length range in seconds (default 20-60)")
