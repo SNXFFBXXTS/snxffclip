@@ -1927,6 +1927,14 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.plset summary{color:var(--dim);font-size:13px;cursor:pointer}
+.pllist{max-height:55vh;overflow:auto}
+.plday{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:12px 0 4px}
+.plrow{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+.plrow img{width:30px;aspect-ratio:9/16;object-fit:cover;border-radius:4px}
+.plrow .tm{width:46px;font-weight:600}.plrow .pf{width:66px;color:var(--acc2)}
+.plrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plrow button{font-size:11px;padding:4px 7px}.plrow.done{opacity:.4}
 .rstats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
 .rstat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;text-align:center}
 .rstat b{display:block;font-size:20px}.rstat span{font-size:11px;color:var(--dim)}
@@ -2203,6 +2211,22 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
   <button type="button" class="tab" data-t="history">History</button>
   <button type="button" class="tab" data-t="results">📈 Results</button></div>
 <div id="results" style="display:none"></div>
+<dialog id="pldlg" class="cdlg">
+ <div class="cdhead"><b id="pltitle">Posting plan</b><button type="button" class="small" onclick="$('#pldlg').close()">✕</button></div>
+ <details class="plset"><summary>When you're free &amp; your accounts</summary>
+  <div class="cdgrid" style="margin-top:8px">
+   <label class="wide">Times you can post and submit within 30 min (e.g. 12:00-13:00, 17:30-22:00)<input type="text" id="pl_win"></label>
+   <label>Posts per day per platform<input type="text" id="pl_day"></label>
+   <label>Hours between posts (same platform)<input type="text" id="pl_gap"></label>
+   <label class="wide">Your accounts<span class="chips" id="pl_mine">
+     <label><input type="checkbox" value="TikTok"> TikTok</label><label><input type="checkbox" value="Instagram Reels"> Instagram</label>
+     <label><input type="checkbox" value="YouTube Shorts"> YouTube</label><label><input type="checkbox" value="X"> X</label></span></label>
+  </div><button type="button" class="small" id="plsave" style="margin-top:8px">Save &amp; re-plan</button></details>
+ <div id="plinfo" class="s" style="font-size:12.5px;color:var(--dim);margin:8px 0"></div>
+ <div id="pllist" class="pllist"></div>
+ <div class="row" style="margin-top:10px"><button type="button" class="small" id="plcopy">Copy plan as text</button>
+  <button type="button" class="go" id="plics" style="margin:0;flex:1">📅 Add to calendar (with reminders)</button></div>
+</dialog>
 <dialog id="pdlg" class="cdlg">
  <div class="cdhead"><b id="pdtitle">Log a post</b><button type="button" class="small" onclick="$('#pdlg').close()">✕</button></div>
  <div id="pdlist" style="margin-top:8px"></div>
@@ -2617,7 +2641,8 @@ async function loadClips(){
     <div class="group"><div class="gname"><span>${esc(g.name)}</span>
       <span style="display:flex;gap:8px;align-items:center">${(()=>{const n=g.clips.filter(c=>(c.checks||[]).length).length;return n?`<span class="gwarn">⚠ ${n} need a look</span>`:''})()}
       <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
-      <button class="gbtn" onclick="review(${gi})">🎬 Review</button></span></div>
+      <button class="gbtn" onclick="review(${gi})">🎬 Review</button>
+      <button class="gbtn" onclick="planGroup(${gi})">🗓 Plan</button></span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
@@ -2734,6 +2759,88 @@ async function loadResults(){
 }
 async function updPost(inp){await api('/api/results/update',{id:inp.dataset.id,[inp.dataset.k]:inp.value});inp.style.borderColor='var(--ok)'}
 async function delPost(id){if(!confirm('Remove this post from your results?'))return;await api('/api/results/delete',{id});loadResults();loadClips()}
+
+/* ---------- posting planner ---------- */
+let plGroup=null, plRows=[], plSet={};
+const PL_SHORT={'TikTok':'TikTok','Instagram Reels':'Instagram','YouTube Shorts':'YouTube','X':'X'};
+async function planGroup(gi){
+  plGroup=lastGroups[gi]; if(!plGroup)return;
+  plSet=await api('/api/settings');
+  $('#pl_win').value=plSet.plan_windows; $('#pl_day').value=plSet.plan_per_day; $('#pl_gap').value=plSet.plan_gap;
+  document.querySelectorAll('#pl_mine input').forEach(i=>i.checked=(plSet.my_platforms||[]).includes(i.value));
+  $('#pltitle').textContent='Posting plan · '+plGroup.name; buildPlan(); $('#pldlg').showModal();
+}
+function parseWins(t){return t.split(',').map(x=>x.trim().match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/))
+  .filter(Boolean).map(m=>[+m[1]*60+ +m[2], +m[3]*60+ +m[4]])}
+function buildPlan(){
+  const wins=parseWins(plSet.plan_windows||''), gap=(+plSet.plan_gap||2)*60, perDay=+plSet.plan_per_day||3;
+  const key=plGroup.clips[0]?plGroup.clips[0].path.split('/')[0]:'_';
+  const camp=camps[key.replace(/~/g,'/')]||{};
+  let plats=(camp.platforms&&camp.platforms.length?camp.platforms:['TikTok','Instagram Reels','YouTube Shorts','X'])
+    .filter(p=>(plSet.my_platforms||[]).includes(p));
+  if(!wins.length){$('#pllist').innerHTML='<div class="empty">Add the times you\'re free above.</div>';return}
+  if(!plats.length){$('#pllist').innerHTML='<div class="empty">None of your accounts match this campaign\'s platforms ('+
+    (camp.platforms||[]).map(p=>PL_SHORT[p]).join(', ')+'). Tick your accounts above.</div>';return}
+  // what to post: best clips first, each platform it isn't on yet, max 5 posts per clip
+  const all=[...plGroup.clips].sort((a,b)=>(b.stars||0)-(a.stars||0));
+  const clips=all.filter(c=>(c.stars||0)>=2), low=all.length-clips.length;
+  const items=[]; const maxRound=plats.length;
+  for(let r=0;r<maxRound;r++) for(const c of clips){
+    const done=(c.posted||[]); const todo=plats.filter(p=>!done.includes(p));
+    const n=done.length+items.filter(i=>i.c===c).length;
+    if(todo[r]&&n<5) items.push({c,p:todo[r]});
+  }
+  // free slots for the next 7 days
+  const now=new Date(), start=new Date(now.getTime()+10*60000), slots=[];
+  for(let d=0;d<7;d++){const day=new Date(now.getFullYear(),now.getMonth(),now.getDate()+d);
+    for(const [a,b] of wins) for(let m=a;m<=b;m+=30){const t=new Date(day.getTime()+m*60000); if(t>start)slots.push(t)}}
+  slots.sort((x,y)=>x-y);
+  const last={}, perDayCount={}; plRows=[];
+  for(const it of items){
+    const s=slots.find(t=>{const dk=t.toDateString()+it.p;
+      return (perDayCount[dk]||0)<perDay && (!last[it.p]||t-last[it.p]>=gap*60000)});
+    if(!s)continue;
+    last[it.p]=s; const dk=s.toDateString()+it.p; perDayCount[dk]=(perDayCount[dk]||0)+1;
+    plRows.push({t:s,p:it.p,c:it.c});
+  }
+  plRows.sort((a,b)=>a.t-b.t);
+  const skipped=items.length-plRows.length;
+  $('#plinfo').innerHTML=`${plRows.length} post${plRows.length===1?'':'s'} planned on ${plats.map(p=>PL_SHORT[p]).join(' & ')}, best clips first, `+
+    `max ${perDay} a day per platform, ${plSet.plan_gap}h apart.`+(skipped?` ${skipped} didn't fit in the next 7 days.`:'')+
+    (low?` ${low} clip${low>1?'s':''} rated under 2★ left out.`:'')+
+    (camp.platforms&&camp.platforms.some(p=>!(plSet.my_platforms||[]).includes(p))?
+      `<br>This campaign also pays on ${camp.platforms.filter(p=>!(plSet.my_platforms||[]).includes(p)).map(p=>PL_SHORT[p]).join(', ')} - tick it above if you have that account.`:'');
+  let html='',lastDay='';
+  const dayName=t=>{const d=Math.round((new Date(t.toDateString())-new Date(new Date().toDateString()))/864e5);
+    return d===0?'Today':d===1?'Tomorrow':t.toLocaleDateString([], {weekday:'long',day:'numeric',month:'short'})};
+  plRows.forEach((r,i)=>{const dn=dayName(r.t); if(dn!==lastDay){html+=`<div class="plday">${dn}</div>`;lastDay=dn}
+    html+=`<div class="plrow" id="plr${i}"><span class="tm">${r.t.toTimeString().slice(0,5)}</span><span class="pf">${PL_SHORT[r.p]}</span>
+      <img src="/thumb/${enc(r.c.path)}?v=${r.c.v}"><span class="nm" title="${esc(r.c.name)}">${starStr(r.c.stars)} ${esc(r.c.name)}</span>
+      ${r.c.caption?`<button class="small" onclick="copyText(capStore[plRows[${i}].c.path],this)">Caption</button>`:''}
+      <button class="small" onclick="plPosted(${i})">✓ Posted</button></div>`});
+  $('#pllist').innerHTML=html||'<div class="empty">Nothing left to post from this batch 🎉</div>';
+}
+function plPosted(i){const r=plRows[i]; logPost(r.c.path,r.c.name); $('#pd_plat').value=r.p;
+  $('#plr'+i).classList.add('done')}
+$('#plsave').onclick=async()=>{
+  plSet.plan_windows=$('#pl_win').value; plSet.plan_per_day=$('#pl_day').value; plSet.plan_gap=$('#pl_gap').value;
+  plSet.my_platforms=[...document.querySelectorAll('#pl_mine input:checked')].map(i=>i.value);
+  await api('/api/settings',{plan_windows:plSet.plan_windows,plan_per_day:plSet.plan_per_day,plan_gap:plSet.plan_gap,my_platforms:plSet.my_platforms});
+  plSet=await api('/api/settings'); buildPlan();
+};
+$('#plcopy').onclick=()=>copyText(plRows.map(r=>`${r.t.toLocaleString([], {weekday:'short',hour:'2-digit',minute:'2-digit'})}  ${PL_SHORT[r.p]}  ${r.c.name}`).join('\n'),$('#plcopy'));
+$('#plics').onclick=()=>{
+  const z=n=>String(n).padStart(2,'0'), f=t=>`${t.getFullYear()}${z(t.getMonth()+1)}${z(t.getDate())}T${z(t.getHours())}${z(t.getMinutes())}00`;
+  const escI=t=>String(t||'').replace(/\\/g,'\\\\').replace(/\n/g,'\\n').replace(/[,;]/g,m=>'\\'+m);
+  let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//snxffclip//planner//EN\r\n';
+  plRows.forEach((r,i)=>{const end=new Date(r.t.getTime()+30*60000);
+    ics+=`BEGIN:VEVENT\r\nUID:clip-${f(r.t)}-${i}@snxffclip\r\nDTSTAMP:${f(new Date())}\r\nDTSTART:${f(r.t)}\r\nDTEND:${f(end)}\r\n`+
+      `SUMMARY:${escI('Post '+r.c.name+' on '+PL_SHORT[r.p])}\r\nDESCRIPTION:${escI((r.c.caption||'')+'\n\nSubmit the link in Whop within 30 minutes!')}\r\n`+
+      `BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Time to post a clip\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nEND:VEVENT\r\n`});
+  ics+='END:VCALENDAR\r\n';
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([ics],{type:'text/calendar'}));
+  a.download='clip-posting-plan.ics'; document.body.appendChild(a); a.click(); a.remove();
+};
 
 async function del(p){
   if(!confirm('Delete this clip?'))return;
@@ -3252,7 +3359,10 @@ def serve_ui(args):
                 st = load_settings()
                 self.send_json({"ai": st.get("ai", ""), "ollama_model": st.get("ollama_model", ""),
                                 "claude_model": st.get("claude_model", "claude-haiku-5-5"),
-                                "has_key": bool(st.get("claude_key"))})
+                                "has_key": bool(st.get("claude_key")),
+                                "plan_windows": st.get("plan_windows", "12:00-13:00, 17:30-22:00"),
+                                "plan_per_day": st.get("plan_per_day", 3), "plan_gap": st.get("plan_gap", 2),
+                                "my_platforms": st.get("my_platforms", ["TikTok", "Instagram Reels"])})
             elif u.path == "/api/campaigncheck":
                 cid = parse_qs(u.query).get("id", [""])[0]
                 if cid not in [x for x, _, _ in list_campaigns()]:
@@ -3275,7 +3385,8 @@ def serve_ui(args):
                 for cid, name, agency in list_campaigns():
                     c = json.loads((campaign_dir(cid) / "campaign.json").read_text())
                     out.append({"id": cid, "name": name, "agency": agency,
-                                "music": c.get("music", True), "on_screen": c.get("on_screen")})
+                                "music": c.get("music", True), "on_screen": c.get("on_screen"),
+                                "platforms": c.get("platforms") or [], "rate": c.get("rate")})
                 self.send_json(out)
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
@@ -3373,6 +3484,17 @@ def serve_ui(args):
                     st["claude_key"] = str(d["claude_key"]).strip()[:300]
                 if d.get("forget_key"):
                     st.pop("claude_key", None)
+                if re.fullmatch(r"[\d:, \-]{3,120}", str(d.get("plan_windows") or "")):
+                    st["plan_windows"] = d["plan_windows"]
+                for k, lo, hi in (("plan_per_day", 1, 12), ("plan_gap", 0.5, 8)):
+                    try:
+                        if d.get(k) not in (None, ""):
+                            st[k] = max(lo, min(hi, float(d[k]) if k == "plan_gap" else int(d[k])))
+                    except ValueError:
+                        pass
+                if isinstance(d.get("my_platforms"), list):
+                    st["my_platforms"] = [x for x in d["my_platforms"]
+                                          if x in ("TikTok", "Instagram Reels", "YouTube Shorts", "X")]
                 save_settings(st)
                 self.send_json({"ok": True, "ai": ai_name()})
             elif u.path == "/api/update":
