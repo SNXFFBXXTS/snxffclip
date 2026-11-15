@@ -128,6 +128,11 @@ caption not from the approved list, missing @tag or #ad, doesn't mention the cam
 from low-res footage. Each campaign is also checked against its saved brief (music allowed when the brief
 bans it, word-for-word captions off, on-screen text that's just a hashtag, missing tag/disclosure…).
 
+### Check-by-eye rules
+Some rules can't be checked automatically (children using the product, renders shown as real footage, made-up
+claims…). Clipper lists them from the brief under *Things to check by eye*, and in 🎬 Review you have to tick
+that you've looked before ⭐ Keep works.
+
 ### AI brain (optional)
 Press **⚙️ AI** in the web page to switch on an AI that reads briefs, picks moments and writes captions:
 - **Ollama** – free, runs on your PC (see below).

@@ -1104,7 +1104,7 @@ def make_caption(c, text, n, ollama=None):
 CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
-                   "exact_captions", "checklist", "rate"]
+                   "exact_captions", "checklist", "rate", "manual_checks"]
 
 
 def _clean_line(t):
@@ -1269,7 +1269,26 @@ def parse_brief(text):
     rates = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)\s*(?:cpm|per\s*1,?000|per\s*1k|/\s*1k)", raw, re.I)]
     rates += [float(x) for x in re.findall(r"(?:cpm|per 1k views|per 1,000 views)[^$\n]{0,20}\$\s?(\d+(?:\.\d+)?)", raw, re.I)]
     c["rate"] = max(rates) if rates else None
+    c["manual_checks"] = manual_checks_from(low)
     return c
+
+
+def manual_checks_from(low):
+    """Rules in a brief that need a human to look at the clip."""
+    out = []
+    if re.search(r"\b(child|children|kids?|minors?|teens?)\b", low):
+        out.append("No children using, setting up or talking through the product - and none mentioned in text")
+    if re.search(r"\brenders?\b|\bcgi\b|computer.generated", low):
+        out.append("Renders/CGI aren't presented as real recorded footage")
+    if re.search(r"(face|name)s? (of|or).{0,30}(person|people)|real people|not in .{0,20}content", low):
+        out.append("No faces or names of people who aren't in the brand's own footage")
+    if re.search(r"made.up (features|specs|prices|claims)|no made-up|false or made-up", low):
+        out.append("On-screen text and caption make no made-up features, prices, dates or claims")
+    if re.search(r"\bai[- ](made|generated|voice)|no ai\b", low):
+        out.append("No AI-made footage, images or voices")
+    if re.search(r"(political|controversial|nsfw|violent)", low):
+        out.append("Nothing political, violent, NSFW or controversial in the clip")
+    return out
 
 
 def ollama_brief(text, model):
@@ -1339,6 +1358,7 @@ def clean_campaign(d):
     except ValueError:
         out["rate"] = None
     out["checklist"] = lst(d.get("checklist"), 200, 30)
+    out["manual_checks"] = lst(d.get("manual_checks"), 200, 10)
     return out
 
 
@@ -1420,7 +1440,8 @@ def save_campaign(c, brief=None, cid=None):
     if cid and (CAMPAIGN_DIR / cid / "campaign.json").is_file():
         dest = CAMPAIGN_DIR / cid
     else:
-        dest = CAMPAIGN_DIR / slug(c["agency"]).lower() / slug(c["name"], 40).lower()
+        tidy = lambda t, n=60: re.sub(r"-{2,}", "-", slug(t, n)).strip("-").lower()
+        dest = CAMPAIGN_DIR / tidy(c["agency"]) / tidy(c["name"], 40)
     for sub in ("source", "clips"):
         (dest / sub).mkdir(parents=True, exist_ok=True)
     (dest / "campaign.json").write_text(json.dumps(c, indent=2, ensure_ascii=False))
@@ -1640,6 +1661,9 @@ def campaign_checks(cid):
             out.append(("warn", f"The brief asks you to tag {b['mention']}"))
         if b["min_len"] and int(c.get("min_len") or 0) < b["min_len"]:
             out.append(("warn", f"The brief's minimum length is {b['min_len']}s"))
+        if b.get("manual_checks") and not c.get("manual_checks"):
+            out.append(("warn", "The brief has rules only you can check (e.g. children, renders) - add them to "
+                                "'Things to check by eye' so Review asks you"))
         if b["disclosure"] and not c.get("disclosure") and not c.get("exact_captions"):
             out.append(("warn", "The brief needs a disclosure like #ad"))
     vids = [f for f in (d / "source").iterdir() if f.suffix.lower() in VIDEO_EXT] if (d / "source").is_dir() else []
@@ -2084,6 +2108,10 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.rvman{display:flex;gap:10px;align-items:flex-start;background:#2a2110;border:1px solid #6b5420;border-radius:10px;
+  padding:8px 10px;margin:0 0 8px;font-size:12.5px;color:#ffd98a}
+.rvman input{width:20px;height:20px;margin-top:2px;accent-color:#ffb03d;flex-shrink:0}
+.rvman.shake{animation:shk .35s}@keyframes shk{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 .gpubox{margin-top:14px;background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:10px}
 .plset summary{color:var(--dim);font-size:13px;cursor:pointer}
 .pllist{max-height:55vh;overflow:auto}
@@ -2356,6 +2384,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <label class="chk wide"><input type="checkbox" id="cf_exact"> Captions must be copied <b>word for word</b> from the list below (nothing added)</label>
    <label class="wide">Example / approved captions (one per line)<textarea id="cf_example_captions" rows="4"></textarea></label>
    <label class="wide">Caption style for the AI<textarea id="cf_caption_rules" rows="2"></textarea></label>
+   <label class="wide">Things to check by eye in Review (one per line)<textarea id="cf_manual_checks" rows="3"
+     placeholder="e.g. No children using the product"></textarea></label>
    <label class="wide">Posting checklist (one per line)<textarea id="cf_checklist" rows="6"></textarea></label>
   </div>
   <div class="dlbox"><div class="dlhead"><b>📥 Footage in your Downloads</b>
@@ -2411,6 +2441,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <button type="button" class="rvnav" id="rvnext">›</button>
  </div>
  <div class="rvcap" id="rvcap"></div>
+ <label class="rvman" id="rvman" style="display:none"><input type="checkbox" id="rvmanok">
+   <span><b>Check by eye before keeping:</b><span id="rvmanlist"></span></span></label>
  <div class="rvbtns"><button type="button" class="rvdrop" id="rvdrop">✕ Drop <small>D</small></button>
    <button type="button" class="rvkeep" id="rvkeep">⭐ Keep <small>K</small></button></div>
  <div class="rvstrip" id="rvstrip"></div>
@@ -2659,7 +2691,7 @@ $('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testing�
 
 /* ---------- campaign builder ---------- */
 let cdEditId='';
-const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist'],
+const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist','manual_checks'],
       TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){
@@ -2826,10 +2858,10 @@ async function loadClips(){
 }
 function starStr(n){n=n||0;let s='';for(let i=1;i<=5;i++)s+=n>=i?'★':n>=i-.5?'⯪':'☆';return s}
 /* ---------- review: watch, keep or drop, delete the rest ---------- */
-let lastGroups=[], rvList=[], rvI=0, rvMark={}, rvName='';
+let lastGroups=[], rvList=[], rvI=0, rvMark={}, rvName='', rvOk={};
 function review(gi){
   const g=lastGroups[gi]; if(!g)return;
-  rvList=g.clips; rvI=0; rvMark={}; rvName=g.name; $('#rvgroup').textContent=g.name; rvShow(); $('#rv').showModal();
+  rvList=g.clips; rvI=0; rvMark={}; rvOk={}; rvName=g.name; $('#rvgroup').textContent=g.name; rvShow(); $('#rv').showModal();
 }
 function rvShow(){
   const c=rvList[rvI]; if(!c)return;
@@ -2837,13 +2869,18 @@ function rvShow(){
   $('#rvcap').innerHTML=`<div style="color:#ffcf3d">${starStr(c.stars)} <b style="color:var(--text)">${(c.stars||0).toFixed(1)}</b> · ${esc(c.why||'')}</div>`+esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
   const kept=Object.values(rvMark).filter(x=>x==='keep').length, dropped=Object.values(rvMark).filter(x=>x==='drop').length;
   $('#rvpos').textContent=`Clip ${rvI+1} of ${rvList.length} · ⭐ ${kept} kept · ✕ ${dropped} dropped`;
+  const man=c.manual||[]; $('#rvman').style.display=man.length?'':'none';
+  $('#rvmanlist').innerHTML=man.map(x=>'<br>• '+esc(x)).join(''); $('#rvmanok').checked=!!rvOk[c.path];
   const st=$('#rvstamp'), m=rvMark[c.path]; st.className='rvstamp'+(m?' '+m:''); st.textContent=m==='keep'?'⭐ Keeping':m==='drop'?'✕ Dropping':'';
   $('#rvstrip').innerHTML=rvList.map((x,i)=>`<img src="/thumb/${enc(x.path)}?v=${x.v}" class="${i===rvI?'cur ':''}${rvMark[x.path]||''}" onclick="rvI=${i};rvShow()">`).join('');
   const unmarked=rvList.filter(x=>!rvMark[x.path]).length;
   $('#rvdone').textContent=kept?`Done — keep ${kept}, delete ${rvList.length-kept}`+(unmarked?` (incl. ${unmarked} not marked)`:'')
     :dropped?`Done — delete ${dropped}`+(unmarked?`, leave ${unmarked} not marked`:''):'Done';
 }
-function rvSet(m){const c=rvList[rvI];rvMark[c.path]=m; if(rvI<rvList.length-1)rvI++; rvShow()}
+function rvSet(m){const c=rvList[rvI];
+  if(m==='keep'&&(c.manual||[]).length&&!rvOk[c.path]){const b=$('#rvman');b.classList.remove('shake');void b.offsetWidth;b.classList.add('shake');return}
+  rvMark[c.path]=m; if(rvI<rvList.length-1)rvI++; rvShow()}
+$('#rvmanok').onchange=e=>{rvOk[rvList[rvI].path]=e.target.checked};
 $('#rvkeep').onclick=()=>rvSet('keep'); $('#rvdrop').onclick=()=>rvSet('drop');
 $('#rvprev').onclick=()=>{if(rvI>0){rvI--;rvShow()}}; $('#rvnext').onclick=()=>{if(rvI<rvList.length-1){rvI++;rvShow()}};
 $('#rvclose').onclick=()=>{$('#rvvideo').pause();$('#rv').close()};
@@ -3363,6 +3400,7 @@ def serve_ui(args):
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
                      "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
                      "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
+                     "manual": camp.get("manual_checks") or [],
                      "posted": posted_count.get(f"{key}/{rel.as_posix()}", []),
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
