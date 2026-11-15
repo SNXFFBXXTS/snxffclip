@@ -134,6 +134,11 @@ clip is next due to be posted there (from your 🗓 Plan times, best clips first
 After posting, tap the button: it starts a 30-minute countdown to submit the link on Whop. Tap it again to
 paste the link; it turns green. Platforms you haven't ticked as your accounts show as *no account*.
 
+### Views from your post links
+In 📈 Results, **⟳ Refresh views** reads the views and likes of every logged post straight from its link
+(with yt-dlp). It also does this quietly when the page opens, at most every 6 hours. TikTok works without
+logging in; Instagram usually needs you logged in to Instagram in Firefox – otherwise type those views in.
+
 ### Logo watermark
 If a campaign needs the brand's logo on every clip, put the logo image (PNG with a transparent background is
 best) in the campaign folder and set *Logo watermark file* (e.g. `logo.png`). It goes just above the video in

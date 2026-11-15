@@ -1708,6 +1708,59 @@ def save_results(d):
     os.replace(tmp, RESULTS_FILE)
 
 
+def fetch_post_stats(url):
+    """Read a post's views/likes from its link with yt-dlp (no download).
+    Instagram often needs you logged in - then it uses Firefox's login if there is one."""
+    if not shutil.which("yt-dlp") or not re.match(r"https?://", url or ""):
+        return None
+    tries = [[]]
+    if "instagram.com" in url and (Path.home() / ".mozilla" / "firefox").is_dir():
+        tries.append(["--cookies-from-browser", "firefox"])
+    for extra in tries:
+        try:
+            r = subprocess.run(["yt-dlp", "-q", "--no-warnings", "--skip-download", "--no-playlist",
+                                "-J", *extra, url], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            continue
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        try:
+            info = json.loads(r.stdout)
+        except ValueError:
+            continue
+        views = info.get("view_count") or info.get("play_count")
+        likes = info.get("like_count")
+        if views is not None or likes is not None:
+            return {"views": views, "likes": likes}
+    return None
+
+
+def refresh_post_stats(ids=None):
+    """Update views/likes for logged posts that have a link. Returns (updated, failed platforms)."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    posts = [p for p in load_results().get("posts", []) if p.get("url") and (not ids or p.get("id") in ids)]
+    with ThreadPoolExecutor(4) as ex:
+        got = dict(zip([p["id"] for p in posts], ex.map(lambda p: fetch_post_stats(p["url"]), posts)))
+    data = load_results()
+    ok, failed = 0, []
+    for p in data.get("posts", []):
+        if p.get("id") not in got:
+            continue
+        st = got[p["id"]]
+        if not st:
+            failed.append(p.get("platform", ""))
+            continue
+        for k in ("views", "likes"):
+            if st.get(k) is not None:
+                p[k] = int(st[k])
+        p["updated"] = time.time()
+        p["auto"] = time.time()
+        ok += 1
+    save_results(data)
+    return ok, failed
+
+
 def len_bucket(sec):
     return "short" if sec <= 22 else "medium" if sec <= 40 else "long"
 
@@ -3098,7 +3151,10 @@ $('#pdadd').onclick=async()=>{
 async function loadResults(){
   const r=await api('/api/results'), el=$('#results'), t=r.total;
   if(!t.posts){el.innerHTML='<div class="empty">No posts logged yet.<br>After posting a clip, press 📊 on it to log the link - then update the views here every few days.</div>';return}
-  el.innerHTML=`<div class="rstats"><div class="rstat"><b>${t.posts}</b><span>posts</span></div>
+  el.innerHTML=`<div class="row" style="margin-bottom:10px;align-items:center;gap:10px">
+      <button type="button" class="small" id="rrefresh" onclick="refreshViews()">⟳ Refresh views</button>
+      <span id="rrmsg" style="font-size:12px;color:var(--dim)">${rrMsg||'Reads views and likes from your post links'}</span></div>
+    <div class="rstats"><div class="rstat"><b>${t.posts}</b><span>posts</span></div>
     <div class="rstat"><b>${fmtN(t.views)}</b><span>views</span></div>
     <div class="rstat"><b>$${t.earn.toFixed(2)}</b><span>rough earnings*</span></div></div>
     ${t.stale?`<div style="color:#ffb03d;font-size:13px;margin-bottom:8px">⚠ ${t.stale} post${t.stale>1?'s haven\'t':' hasn\'t'} had views updated for 3+ days</div>`:''}
@@ -3117,6 +3173,16 @@ async function loadResults(){
       <td><input value="${p.likes??''}" data-id="${p.id}" data-k="likes" onchange="updPost(this)" style="width:60px"></td>
       <td><button class="small" onclick="delPost('${p.id}')">✕</button></td></tr>`}).join('')}</table>
     <div style="font-size:11px;color:var(--dim);margin-top:8px">* views ÷ 1,000 × the campaign's pay rate. Ignores minimum payouts, caps and fees, so it's a rough guide.</div>`;
+}
+let rrMsg='';
+async function refreshViews(){
+  const b=$('#rrefresh'); b.disabled=true; b.textContent='⟳ Checking your posts…';
+  $('#rrmsg').textContent='This takes a few seconds per post';
+  const r=await api('/api/results/refresh',{});
+  const f=r.failed||[], ig=f.filter(p=>p.startsWith('Instagram')).length;
+  rrMsg=`✓ Updated ${r.refreshed} post${r.refreshed===1?'':'s'}`+(f.length?` · couldn't read ${f.length}`+
+    (ig?` (Instagram usually needs you logged in to Instagram in Firefox - or type those views in)`:''):'');
+  await loadResults(); loadClips();
 }
 async function updPost(inp){await api('/api/results/update',{id:inp.dataset.id,[inp.dataset.k]:inp.value});inp.style.borderColor='var(--ok)'}
 async function delPost(id){if(!confirm('Remove this post from your results?'))return;await api('/api/results/delete',{id});loadResults();loadClips()}
@@ -3252,6 +3318,10 @@ async function del(p){
   await api('/api/delete',{path:p}); loadClips();
 }
 poll(); loadClips(); setInterval(poll,1500);
+// quietly refresh post views when the page opens (at most every 6 hours)
+setTimeout(async()=>{try{const k='clipper_views_at', last=+(localStorage.getItem(k)||0);
+  if(Date.now()-last<6*3600e3)return; localStorage.setItem(k,Date.now());
+  await api('/api/results/refresh',{}); if($('#results').style.display!=='none')loadResults()}catch(e){}},8000);
 </script></body></html>"""
 
 
@@ -3928,6 +3998,12 @@ def serve_ui(args):
                     srv.server_close()
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 threading.Thread(target=restart, daemon=True).start()
+            elif u.path == "/api/results/refresh":
+                with res_lock:
+                    ok, failed = refresh_post_stats(d.get("ids") or None)
+                out = results_summary()
+                out["refreshed"], out["failed"] = ok, failed
+                self.send_json(out)
             elif u.path in ("/api/results/add", "/api/results/update", "/api/results/delete"):
                 with res_lock:
                     data = load_results()
