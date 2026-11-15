@@ -1784,6 +1784,9 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.readybar{display:flex;gap:10px;align-items:center;background:#123726;border:1px solid var(--ok);border-radius:14px;
+  padding:10px 12px;margin-bottom:14px;font-size:14px}.readybar span{flex:1}
+#updbtn.has{border-color:var(--acc2);color:var(--acc2)}
 .warns{padding:4px 8px 0}
 .warn{font-size:11px;color:#ffb03d;line-height:1.35}
 .cchk{margin-top:6px;font-size:12.5px}.cchk div{margin-top:2px}
@@ -1875,7 +1878,12 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 .pv{position:absolute;left:8px;right:8px;text-align:center;font-weight:800;line-height:1.15}
 .pvmatch{position:absolute;top:6px;right:6px;font-size:9px;background:#0009;color:#ffb03d;padding:2px 5px;border-radius:5px;display:none}
 </style></head><body>
-<h1>✂️ <span>Clipper</span><button type="button" class="small" id="aibtn" style="margin-left:auto">⚙️ AI</button></h1>
+<h1>✂️ <span>Clipper</span>
+  <button type="button" class="small" id="updbtn" style="margin-left:auto" title="Get the latest clipper from GitHub">⟳ Update</button>
+  <button type="button" class="small" id="aibtn">⚙️ AI</button></h1>
+<div id="readybar" class="readybar" style="display:none"><span id="readytxt"></span>
+  <button type="button" class="go" id="readygo" style="margin:0;padding:8px 14px;width:auto">🎬 Review now</button>
+  <button type="button" class="small" onclick="$('#readybar').style.display='none'">✕</button></div>
 <dialog id="aidlg" class="cdlg">
  <div class="cdhead"><b>AI brain</b><button type="button" class="small" id="aiclose">✕</button></div>
  <p class="s" style="color:var(--dim);font-size:13px;margin:8px 0">Optional. With an AI switched on, clipper uses it to read
@@ -2029,7 +2037,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
     <span class="s" style="font-size:12px;color:var(--dim)">ticked files get moved into this campaign</span></div>
     <div id="cf_files" class="dllist"></div></div>
   <div class="row" style="margin-top:10px"><button type="button" class="small" id="cdback">← Paste again</button>
-   <button type="button" class="go" id="cdsave" style="margin:0;flex:1">🚀 Publish campaign</button></div>
+   <button type="button" class="small" id="cdsave">Publish only</button>
+   <button type="button" class="go" id="cdgo" style="margin:0;flex:1">🚀 Publish &amp; clip everything</button></div>
  </div>
 </dialog>
 
@@ -2259,6 +2268,22 @@ async function campCheck(){
   el.innerHTML=(probs.length?'':'<div class="ok">✅ Campaign settings match the brief</div>')+
     r.map(([l,m])=>`<div class="${l}">${l==='info'?'ℹ️':'⚠'} ${esc(m)}</div>`).join('');
 }
+/* ---------- update ---------- */
+async function checkVersion(fetch){
+  const v=await api('/api/version'+(fetch?'?fetch=1':'')); const b=$('#updbtn');
+  b.title=`Version ${v.version}`+(v.behind?` - ${v.behind} update(s) available`:'');
+  b.classList.toggle('has',v.behind>0); b.textContent=v.behind?`⟳ Update (${v.behind} new)`:'⟳ Update';
+}
+$('#updbtn').onclick=async()=>{
+  const b=$('#updbtn'); b.disabled=true; b.textContent='Updating…';
+  const r=await api('/api/update',{});
+  if(!r.ok){alert(r.msg);b.disabled=false;checkVersion();return}
+  b.textContent='Restarting…';
+  for(let i=0;i<30;i++){await new Promise(x=>setTimeout(x,1000));try{await api('/api/version');location.reload();return}catch(e){}}
+  alert('Clipper didn\'t come back - restart it from the terminal');
+};
+setTimeout(()=>checkVersion(true),1500); setInterval(()=>checkVersion(true),30*60*1000);
+
 /* ---------- AI settings ---------- */
 let aiProv='';
 function aiShow(){document.querySelectorAll('#aiprov button').forEach(b=>b.classList.toggle('on',b.dataset.v===aiProv));
@@ -2330,15 +2355,25 @@ $('#cdread').onclick=async()=>{
     :'Filled in automatically - check every box (especially name, agency, tag and on-screen text), fix anything, then save.';
   cdFill(r);
 };
-$('#cdsave').onclick=async()=>{
+async function cdPublish(andClip){
   const files=[...document.querySelectorAll('#cf_files input:checked')].map(i=>i.value);
-  const b=$('#cdsave'); b.disabled=true; b.textContent=files.length?`Moving ${files.length} file(s)…`:'Saving…';
+  const b=andClip?$('#cdgo'):$('#cdsave'), old=b.textContent; b.disabled=true;
+  b.textContent=files.length?`Moving ${files.length} file(s)…`:'Saving…';
   const r=await api('/api/savecampaign',{campaign:cdRead(),id:cdEditId,brief:cdEditId?'':$('#cdbrief').value,files});
-  b.disabled=false; b.textContent='🚀 Publish campaign';
+  b.disabled=false; b.textContent=old;
   if(r.error){alert(r.error);return}
   $('#cdlg').close(); await loadCamps(); $('#camp').value=r.id; $('#camp').onchange({target:$('#camp')});
   loadClips();
-};
+  if(andClip){                                   // straight into the bulk scrape
+    const j=await api('/api/jobs',{bulk:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,captions:true,
+      campaign:r.id,style:'auto',match:false,words:3,cap:{},music:'',music_vol:.15,ollama:''});
+    if(j.error){alert(j.error);return}
+    try{if('Notification' in window&&Notification.permission==='default')Notification.requestPermission()}catch(e){}
+    poll(); window.scrollTo({top:document.querySelector('#jobs').offsetTop-20,behavior:'smooth'});
+  }
+}
+$('#cdsave').onclick=()=>cdPublish(false);
+$('#cdgo').onclick=()=>cdPublish(true);
 function copyText(t,btn){
   const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
   ta.select(); let ok=false; try{ok=document.execCommand('copy')}catch(e){}
@@ -2379,10 +2414,16 @@ async function poll(){
     </div>`).join('');
   busy={}; for(const j of jobs) if(j.clip&&(j.status==='running'||j.status==='queued')) busy[j.clip]=j;
   let refresh=false; const fresh=[];
+  let ready=null;
   for(const j of jobs) if(j.status==='done'&&!finished.has(j.id)){finished.add(j.id);
-    if(!first){refresh=true;if(j.clip)fresh.push(j.clip)}}
+    if(!first){refresh=true;if(j.clip)fresh.push(j.clip);if(j.kind!=='restyle'&&j.made)ready=j}}
   first=false;
   if(refresh) await loadClips(); else markBusy();
+  if(ready){
+    $('#readytxt').textContent=`✅ ${ready.made} clip${ready.made>1?'s':''} ready to review`+(ready.campaign?` · ${ready.campaign.split('/').pop().replace(/-/g,' ')}`:'');
+    $('#readybar').style.display=''; $('#readygo').onclick=()=>{$('#readybar').style.display='none';review(0)};
+    try{if(document.hidden&&'Notification' in window&&Notification.permission==='granted')new Notification('Clipper',{body:$('#readytxt').textContent})}catch(e){}
+  }
   fresh.forEach(p=>{const el=clipEl(p);if(!el)return;el.classList.add('fresh');
     el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>el.classList.remove('fresh'),8000)});
 }
@@ -2726,6 +2767,18 @@ def serve_ui(args):
     threading.Thread(target=worker, daemon=True).start()
 
     # ---------- helpers ----------
+    def version_info(fetch=False):
+        repo = Path(__file__).resolve().parent
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, timeout=60)
+        try:
+            if fetch:
+                g("fetch", "-q")
+            head = g("log", "-1", "--format=%h · %cd", "--date=format:%d %b %H:%M").stdout.strip()
+            behind = g("rev-list", "--count", "HEAD..@{u}").stdout.strip()
+            return {"version": head or "unknown", "behind": int(behind) if behind.isdigit() else 0, "git": True}
+        except (OSError, subprocess.TimeoutExpired):
+            return {"version": "unknown", "behind": 0, "git": False}
+
     def delete_clip(rel):
         f, root = safe(rel, want_root=True)
         if not f or f.suffix != ".mp4":
@@ -2851,8 +2904,11 @@ def serve_ui(args):
         return t if t.exists() else None
 
     def public(job):
+        p = job["params"]
         return {k: (list(v) if k == "log" else v) for k, v in job.items()
-                if k not in ("proc", "params")} | {"url": job["params"]["url"]}
+                if k not in ("proc", "params")} | {"url": p["url"], "campaign": p.get("campaign", ""),
+                                                     "kind": "bulk" if p.get("bulk") else "batch" if p.get("batch")
+                                                     else "restyle" if p.get("restyle") else "single"}
 
     # ---------- http ----------
     class H(BaseHTTPRequestHandler):
@@ -2926,6 +2982,8 @@ def serve_ui(args):
             elif u.path == "/api/jobs":
                 with lock:
                     self.send_json([public(jobs[i]) for i in reversed(order)])
+            elif u.path == "/api/version":
+                self.send_json(version_info(fetch="fetch" in parse_qs(u.query)))
             elif u.path == "/api/settings":
                 st = load_settings()
                 self.send_json({"ai": st.get("ai", ""), "ollama_model": st.get("ollama_model", ""),
@@ -3053,6 +3111,20 @@ def serve_ui(args):
                     st.pop("claude_key", None)
                 save_settings(st)
                 self.send_json({"ok": True, "ai": ai_name()})
+            elif u.path == "/api/update":
+                if any(j["status"] in ("running", "queued") for j in jobs.values()):
+                    return self.send_json({"ok": False, "msg": "Wait for the running jobs to finish first"})
+                repo = Path(__file__).resolve().parent
+                r = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"], capture_output=True, text=True)
+                if r.returncode != 0:
+                    return self.send_json({"ok": False, "msg": "git pull failed: " + (r.stderr or r.stdout)[-300:]})
+                self.send_json({"ok": True, "msg": (r.stdout.strip().splitlines() or ["Updated"])[-1]})
+
+                def restart():
+                    time.sleep(0.8)
+                    srv.server_close()
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                threading.Thread(target=restart, daemon=True).start()
             elif u.path == "/api/aitest":
                 name = ai_name()
                 if not name:
