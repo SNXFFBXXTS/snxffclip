@@ -89,6 +89,11 @@ re-scraping the same folder is quick.
 picks by movement and sound instead – short videos are used whole, longer ones get their liveliest stretch,
 starting and ending on scene cuts. Videos shorter than the campaign's minimum are skipped.
 
+**Graphics card:** ⚙️ AI → *Speed* shows whether your NVIDIA card is being used. With the NVIDIA driver
+installed, *Set up GPU* adds the CUDA libraries (pip, no sudo) and clipper uses the card automatically –
+falling back to the CPU if anything's wrong. `./clipper.py --gpu` shows the status and
+`./clipper.py --speedtest some-video.mp4` compares CPU vs GPU on its first minute.
+
 **Speed:** the web page's Fast / Good / Best use English-only speech models (`base.en`, `small.en`,
 `medium.en`) which are faster and more accurate for English. All CPU cores are used. An NVIDIA card with
 CUDA set up is several times faster again.

@@ -133,6 +133,88 @@ def fetch_segment(src, start, end, tmp: Path) -> Path:
 # ======================================================================
 # transcription
 # ======================================================================
+# ---------- graphics card (CUDA) ----------
+CUDA_PKGS = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]
+_CUDA = {}
+
+
+def preload_cuda():
+    """Load NVIDIA's CUDA libraries from the pip packages (no system CUDA needed).
+    Returns True if the graphics card can be used."""
+    if "ok" in _CUDA:
+        return _CUDA["ok"]
+    import ctypes
+    import glob
+    import importlib
+    ok = False
+    try:
+        for mod, pats in (("nvidia.cublas", ["libcublasLt.so.12", "libcublas.so.12"]),
+                          ("nvidia.cudnn", ["libcudnn.so.9", "libcudnn_*.so.9"])):
+            m = importlib.import_module(mod)
+            libdir = Path(list(m.__path__)[0]) / "lib"
+            for pat in pats:
+                for f in sorted(glob.glob(str(libdir / pat))):
+                    ctypes.CDLL(f, mode=ctypes.RTLD_GLOBAL)
+        import ctranslate2
+        ok = ctranslate2.get_cuda_device_count() > 0
+    except Exception as e:                       # packages missing / no driver - use the CPU
+        _CUDA["why"] = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+    _CUDA["ok"] = ok
+    return ok
+
+
+def gpu_status():
+    """What the user needs to know about using the graphics card."""
+    st = {"gpu": None, "driver": False, "libs": False, "ready": False, "msg": ""}
+    if shutil.which("nvidia-smi"):
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            st["gpu"], st["driver"] = r.stdout.strip().splitlines()[0], True
+    import importlib.util
+    st["libs"] = all(importlib.util.find_spec(m) is not None for m in ("nvidia.cublas", "nvidia.cudnn")) \
+        if importlib.util.find_spec("nvidia") else False
+    if st["driver"] and st["libs"]:
+        r = subprocess.run([sys.executable, "-c",
+                            "import sys; sys.path.insert(0, %r); import clipper; print(clipper.preload_cuda())"
+                            % str(Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=120)
+        st["ready"] = r.stdout.strip().endswith("True")
+    if st["ready"]:
+        st["msg"] = f"✅ Using your graphics card ({st['gpu'].split(',')[0]}) - transcription is much faster"
+    elif not st["driver"]:
+        st["msg"] = ("No NVIDIA driver found (nvidia-smi doesn't work). Install the right NVIDIA driver for your card "
+                     "first - ask Claude Code: \"install the NVIDIA driver for my GTX 1050 Ti on EndeavourOS\".")
+    elif not st["libs"]:
+        st["msg"] = f"Driver OK ({st['gpu'].split(',')[0]}). Press Set up GPU to add the CUDA libraries (about 1 GB, no sudo)."
+    else:
+        st["msg"] = "Driver and CUDA libraries are there but the card didn't start - restart the PC, then try again."
+    return st
+
+
+def speed_test(path, model="small.en", secs=60):
+    """Transcribe the first minute on the CPU and on the graphics card and compare."""
+    import time as _t
+    from faster_whisper import WhisperModel
+    audio = load_audio(Path(path))[: 16000 * secs]
+    res = {}
+    for dev in ("cpu", "cuda"):
+        if dev == "cuda" and not preload_cuda():
+            print(f"  graphics card: not available ({_CUDA.get('why', 'not set up')})")
+            continue
+        try:
+            t = _t.time()
+            m = WhisperModel(model, device=dev, compute_type="int8", cpu_threads=os.cpu_count() or 4)
+            segs, _ = m.transcribe(audio, language="en" if model.endswith(".en") else None)
+            n = sum(1 for _ in segs)
+            res[dev] = _t.time() - t
+            print(f"  {dev:4s}: {res[dev]:.1f}s for {secs}s of audio ({n} segments)")
+        except Exception as e:
+            print(f"  {dev}: failed - {str(e).splitlines()[0][:150]}")
+    if "cpu" in res and "cuda" in res:
+        print(f"  → graphics card is {res['cpu'] / res['cuda']:.1f}x faster")
+    return res
+
+
 def load_audio(path: Path, sr=16000):
     """Decode audio with ffmpeg ourselves (avoids faster-whisper's PyAV decoder,
     which breaks with newer PyAV versions)."""
@@ -167,6 +249,7 @@ def transcribe(path: Path, model_size: str, cache=True):
 
     print(f"  transcribing with whisper '{model_size}' (first run downloads the model)...")
     audio = load_audio(path)
+    gpu = preload_cuda()
 
     def attempt(device):
         import os
@@ -183,7 +266,7 @@ def transcribe(path: Path, model_size: str, cache=True):
         return res
 
     try:
-        out = attempt("auto")
+        out = attempt("cuda" if gpu else "cpu")
     except Exception as e:
         print(f"\n  ! graphics card didn't work ({str(e).splitlines()[0][:120]})")
         print("  retrying on the CPU (slower but works everywhere)...")
@@ -1927,6 +2010,7 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.gpubox{margin-top:14px;background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:10px}
 .plset summary{color:var(--dim);font-size:13px;cursor:pointer}
 .pllist{max-height:55vh;overflow:auto}
 .plday{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:12px 0 4px}
@@ -2063,6 +2147,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <label class="wide">Model<select id="ai_cm"><option value="claude-haiku-5-5">Claude Haiku 5.5 - cheapest, fast</option>
      <option value="claude-sonnet-5-5">Claude Sonnet 5.5 - smarter, costs more</option></select></label>
    <div class="wide s" style="font-size:12px;color:var(--dim)">Get a key at console.anthropic.com (pay as you go). It's saved only on this PC, in settings.json.</div></div>
+ <div class="gpubox"><b>⚡ Speed</b><div id="gpumsg" class="s" style="font-size:13px;margin:4px 0">Checking your graphics card…</div>
+   <button type="button" class="small" id="gpusetup" style="display:none">Set up GPU</button></div>
  <div class="row" style="margin-top:12px"><button type="button" class="small" id="aitest">Test</button>
    <span id="aimsg" class="s" style="font-size:13px;align-self:center"></span>
    <button type="button" class="go" id="aisave" style="margin:0;flex:1">Save</button></div>
@@ -2486,7 +2572,11 @@ function aiShow(){document.querySelectorAll('#aiprov button').forEach(b=>b.class
 $('#aiprov').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;aiProv=b.dataset.v;aiShow()});
 $('#aibtn').onclick=async()=>{const s=await api('/api/settings');aiProv=s.ai||'';$('#ai_om').value=s.ollama_model||'';
   $('#ai_cm').value=s.claude_model||'claude-haiku-5-5';$('#ai_key').value='';$('#ai_haskey').textContent=s.has_key?'✓ key saved':'';
-  $('#aimsg').textContent='';aiShow();$('#aidlg').showModal()};
+  $('#aimsg').textContent='';aiShow();$('#aidlg').showModal(); gpuCheck()};
+async function gpuCheck(){$('#gpumsg').textContent='Checking your graphics card…';const g=await api('/api/gpu');
+  $('#gpumsg').textContent=g.msg; $('#gpusetup').style.display=g.driver&&!g.libs?'':'none'}
+$('#gpusetup').onclick=async()=>{await api('/api/gpusetup',{});$('#gpumsg').textContent='Installing - watch Jobs below. Press ⚙️ AI again afterwards to re-check.';
+  $('#gpusetup').style.display='none';poll()};
 $('#aiclose').onclick=()=>$('#aidlg').close();
 async function aiSave(){return api('/api/settings',{ai:aiProv,ollama_model:$('#ai_om').value.trim(),claude_model:$('#ai_cm').value,claude_key:$('#ai_key').value.trim()})}
 $('#aisave').onclick=async()=>{const r=await aiSave();$('#aimsg').textContent=r.ai?'Using '+r.ai:'AI off';setTimeout(()=>$('#aidlg').close(),700)};
@@ -2987,6 +3077,11 @@ def serve_ui(args):
             if job["status"] == "cancelled":
                 continue
             p = job["params"]
+            if p.get("setup") == "gpu":
+                cmd = [sys.executable, "-m", "pip", "install", "--user", "--break-system-packages", "--progress-bar", "off",
+                       *CUDA_PKGS]
+                run_job(job, cmd)
+                continue
             if p.get("restyle"):
                 cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--restyle", p["restyle"],
                        "--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
@@ -3026,7 +3121,7 @@ def serve_ui(args):
 
     def add_history(job):
         p = job.get("params", {})
-        kind = ("Restyle" if p.get("restyle") else "Bulk folder scrape" if p.get("bulk")
+        kind = ("GPU setup" if p.get("setup") else "Restyle" if p.get("restyle") else "Bulk folder scrape" if p.get("bulk")
                 else "Clip each video" if p.get("batch") else "Clip a video")
         url = p.get("url") or ""
         camp_name = (p.get("campaign") or "").split("/")[-1].replace("-", " ")
@@ -3082,7 +3177,8 @@ def serve_ui(args):
                 job["stage"] = "Cancelled"
             elif rc == 0:
                 job["status"], job["progress"] = "done", 100
-                job["stage"] = ("Done — clip updated ✓" if job.get("clip")
+                job["stage"] = ("Done — graphics card libraries installed. Press ⚙️ AI to check it"
+                                if job["params"].get("setup") else "Done — clip updated ✓" if job.get("clip")
                                 else f"Done — {job['made']} clips ready")
             else:
                 job["status"] = "error"
@@ -3276,7 +3372,7 @@ def serve_ui(args):
         p = job["params"]
         return {k: (list(v) if k == "log" else v) for k, v in job.items()
                 if k not in ("proc", "params")} | {"url": p["url"], "campaign": p.get("campaign", ""),
-                                                     "kind": "bulk" if p.get("bulk") else "batch" if p.get("batch")
+                                                     "kind": "setup" if p.get("setup") else "bulk" if p.get("bulk") else "batch" if p.get("batch")
                                                      else "restyle" if p.get("restyle") else "single"}
 
     # ---------- http ----------
@@ -3353,6 +3449,8 @@ def serve_ui(args):
                     self.send_json([public(jobs[i]) for i in reversed(order)])
             elif u.path == "/api/results":
                 self.send_json(results_summary())
+            elif u.path == "/api/gpu":
+                self.send_json(gpu_status())
             elif u.path == "/api/version":
                 self.send_json(version_info(fetch="fetch" in parse_qs(u.query)))
             elif u.path == "/api/settings":
@@ -3560,6 +3658,16 @@ def serve_ui(args):
                             x["updated"] = time.time()
                     save_results(data)
                 self.send_json(results_summary())
+            elif u.path == "/api/gpusetup":
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": {"url": "", "setup": "gpu"}, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": "Setting up the graphics card (CUDA libraries)", "error": "",
+                       "made": 0, "k": 1, "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
             elif u.path == "/api/aitest":
                 name = ai_name()
                 if not name:
@@ -3721,6 +3829,8 @@ def main():
     p.add_argument("--cap-json", help=argparse.SUPPRESS)
     p.add_argument("--fonts", action="store_true", help="list fonts you can use")
     p.add_argument("--check", metavar="CAMPAIGN", help="check a campaign's settings against its brief, and its clips")
+    p.add_argument("--gpu", action="store_true", help="show whether the graphics card can be used")
+    p.add_argument("--speedtest", metavar="VIDEO", help="compare CPU vs graphics card on a video's first minute")
     p.add_argument("--music", help="background music: a file, or a folder (random track per clip)")
     p.add_argument("--music-vol", type=float, default=0.15, help="music volume 0-1 (default 0.15)")
     p.add_argument("--music-start", type=float, default=0.0, help="start the music N seconds in")
@@ -3731,6 +3841,12 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     need("ffmpeg")
+    if args.gpu:
+        print(gpu_status()["msg"])
+        return
+    if args.speedtest:
+        speed_test(args.speedtest, args.model if args.model.endswith(".en") else "small.en")
+        return
     if args.check:
         c = load_campaign(args.check)
         print(f"Campaign: {c.get('name')}  ({c['id']})")
