@@ -1112,7 +1112,21 @@ def restyle_mode(args):
 # ======================================================================
 # campaigns  (rules for each clipping campaign live in campaigns/*.json)
 # ======================================================================
-CAMPAIGN_DIR = Path(__file__).resolve().parent / "campaigns"
+def projects_root():
+    """The user's chosen main folder for everything (settings: projects_dir), or None for the default."""
+    p = str(load_settings().get("projects_dir") or "").strip()
+    if p:
+        p = Path(p).expanduser()
+        if p.is_dir():
+            return p.resolve()
+    return None
+
+
+PROJECTS = projects_root()
+# campaigns live in the projects folder if one is chosen, else next to clipper.py (as before)
+CAMPAIGN_DIR = PROJECTS or Path(__file__).resolve().parent / "campaigns"
+if PROJECTS:                                     # free clips (no campaign) go in there too
+    OUT_DIR = PROJECTS / "Free clips"
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 
@@ -2390,6 +2404,12 @@ select:disabled{opacity:.45}
 .rtable input{width:80px;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
 .rtable tr.stale input{border-color:#ffb03d}
 .rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
+.fplist{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+.fplist div{padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13.5px}
+.fplist div:hover{background:var(--line)}
+#fpnew{background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font:inherit}
+.projroot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.projroot code{font-size:12.5px;word-break:break-all}
 .postedb{padding:2px 8px 0;font-size:11px;color:var(--ok)}
 .plats{display:flex;flex-wrap:wrap;gap:5px;padding:7px 8px 0}
 .pt{flex:1 1 auto;min-width:0;border:1px solid var(--line);background:none;color:var(--dim);border-radius:8px;
@@ -2668,8 +2688,25 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 
 <div class="tabs"><button type="button" class="tab on" data-t="jobs">Jobs</button>
   <button type="button" class="tab" data-t="history">History</button>
-  <button type="button" class="tab" data-t="results">📈 Results</button></div>
+  <button type="button" class="tab" data-t="results">📈 Results</button>
+  <button type="button" class="tab" data-t="projects">📁 Projects</button></div>
 <div id="results" style="display:none"></div>
+<div id="projects" style="display:none"></div>
+<dialog id="fpdlg" class="cdlg">
+ <div class="cdhead"><b>Choose your projects folder</b><button type="button" class="small" onclick="$('#fpdlg').close()">✕</button></div>
+ <div class="s" style="font-size:12.5px;color:var(--dim);margin:6px 0 8px">All your campaigns, footage and clips will live in this folder.
+   Pick an empty folder (or make a new one), e.g. <i>Clipping</i> in your Documents.</div>
+ <div id="fpdrives" class="row" style="gap:6px;flex-wrap:wrap"></div>
+ <div class="row" style="gap:6px;align-items:center;margin:6px 0"><button type="button" class="small" id="fpup">⬆ Up</button>
+   <button type="button" class="small" id="fphome">🏠 Home</button>
+   <code id="fppath" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></code></div>
+ <div id="fplist" class="fplist"></div>
+ <div class="row" style="gap:6px;margin-top:8px"><input id="fpnew" placeholder="New folder name" style="flex:1">
+   <button type="button" class="small" id="fpmk">+ Make folder</button></div>
+ <label class="toggle" style="margin-top:8px"><input type="checkbox" id="fpmove"> Move my existing campaigns &amp; clips into it</label>
+ <div class="row" style="margin-top:10px;gap:8px"><span id="fpmsg" class="s" style="font-size:12.5px;align-self:center;flex:1"></span>
+   <button type="button" class="go" id="fpuse" style="margin:0;width:auto;padding:10px 16px">Use this folder</button></div>
+</dialog>
 <dialog id="pldlg" class="cdlg">
  <div class="cdhead"><b id="pltitle">Posting plan</b><button type="button" class="small" onclick="$('#pldlg').close()">✕</button></div>
  <details class="plset"><summary>When you're free &amp; your accounts</summary>
@@ -3174,8 +3211,9 @@ $('#rvdone').onclick=async()=>{
 /* ---------- tabs + history ---------- */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
-  ['jobs','history','results'].forEach(t=>$('#'+t).style.display=b.dataset.t===t?'':'none');
+  ['jobs','history','results','projects'].forEach(t=>$('#'+t).style.display=b.dataset.t===t?'':'none');
   if(b.dataset.t==='history')loadHistory(); if(b.dataset.t==='results')loadResults();
+  if(b.dataset.t==='projects')loadProjects();
 });
 async function loadHistory(){
   const h=await api('/api/history'), el=$('#history');
@@ -3231,6 +3269,53 @@ async function loadResults(){
       <td><input value="${p.likes??''}" data-id="${p.id}" data-k="likes" onchange="updPost(this)" style="width:60px"></td>
       <td><button class="small" onclick="delPost('${p.id}')">✕</button></td></tr>`}).join('')}</table>
     <div style="font-size:11px;color:var(--dim);margin-top:8px">* views ÷ 1,000 × the campaign's pay rate. Ignores minimum payouts, caps and fees, so it's a rough guide.</div>`;
+}
+/* ---------- projects folder ---------- */
+const fmtSize=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':b>=1e3?Math.round(b/1e3)+' KB':(b||0)+' B';
+let projPaths=[];
+async function loadProjects(){
+  const r=await api('/api/projects'), el=$('#projects');
+  projPaths=[r.root, r.free, ...r.campaigns.map(c=>c.path)];
+  const tot=r.campaigns.reduce((a,c)=>a+c.source_size+c.clips_size,0)+r.free_size;
+  el.innerHTML=`<div class="projroot"><div class="s" style="font-size:12px;color:var(--dim)">Your projects folder${r.custom?'':' (default)'} · ${fmtSize(tot)} in total</div>
+      <code>${esc(r.root)}</code>
+      <div class="row" style="gap:8px;margin-top:8px"><button type="button" class="small" onclick="openDir(0)">📂 Open</button>
+      <button type="button" class="small" onclick="pickFolder()">Change folder…</button>
+      ${r.custom?`<button type="button" class="small" onclick="resetFolder()">Back to default</button>`:''}</div></div>
+    <table class="rtable"><tr><th>Campaign</th><th>Footage</th><th>Clips</th><th></th></tr>
+    ${r.campaigns.map((c,i)=>`<tr><td><b>${esc(c.name)}</b><div style="font-size:11.5px;color:var(--dim)">${esc(c.agency)}</div></td>
+      <td>${c.sources} · ${fmtSize(c.source_size)}</td><td>${c.clips} · ${fmtSize(c.clips_size)}</td>
+      <td><button type="button" class="small" onclick="openDir(${i+2})">📂</button></td></tr>`).join('')
+      ||'<tr><td colspan="4" style="color:var(--dim)">No campaigns yet - press + New above</td></tr>'}
+    <tr><td><b>Free clips</b><div style="font-size:11.5px;color:var(--dim)">pasted links, no campaign</div></td><td>–</td>
+      <td>${r.free_clips} · ${fmtSize(r.free_size)}</td><td><button type="button" class="small" onclick="openDir(1)">📂</button></td></tr></table>
+    <div style="font-size:11.5px;color:var(--dim);margin-top:8px">📂 opens the folder on the PC clipper runs on.</div>`;
+}
+async function openDir(i){const r=await api('/api/open',{path:projPaths[i]}); if(!r.ok)alert(r.msg||"Couldn't open it")}
+let fpCur='';
+async function fpGo(path){
+  const r=await api('/api/dirs?path='+encodeURIComponent(path||'')); fpCur=r.path;
+  $('#fppath').textContent=r.path; $('#fpup').disabled=!r.parent; $('#fpup').onclick=()=>fpGo(r.parent);
+  $('#fphome').onclick=()=>fpGo(r.home);
+  $('#fpdrives').innerHTML=r.drives.map((d,i)=>`<button type="button" class="small" data-i="${i}">${esc(d)}</button>`).join('');
+  $('#fpdrives').querySelectorAll('button').forEach(b=>b.onclick=()=>fpGo(r.drives[+b.dataset.i]));
+  const sep=r.path.includes('\\')?'\\':'/';
+  $('#fplist').innerHTML=r.dirs.map((n,i)=>`<div data-i="${i}">📁 ${esc(n)}</div>`).join('')||'<div style="color:var(--dim);cursor:default">(no folders in here)</div>';
+  $('#fplist').querySelectorAll('div[data-i]').forEach(x=>x.onclick=()=>fpGo((r.path.endsWith(sep)?r.path:r.path+sep)+r.dirs[+x.dataset.i]));
+}
+async function pickFolder(){$('#fpmsg').textContent='';$('#fpmove').checked=false;$('#fpnew').value='';await fpGo('');$('#fpdlg').showModal()}
+$('#fpmk').onclick=async()=>{const r=await api('/api/mkdir',{path:fpCur,name:$('#fpnew').value});
+  if(!r.ok){$('#fpmsg').textContent=r.msg;return} $('#fpnew').value=''; fpGo(r.path)};
+async function setFolder(body){
+  $('#fpmsg').textContent='Saving…';
+  const r=await api('/api/projects/set',body);
+  if(!r.ok){$('#fpmsg').textContent=r.msg;alert(r.msg);return}
+  $('#fpmsg').textContent='Restarting clipper…'; setTimeout(()=>location.reload(),3000);
+}
+$('#fpuse').onclick=()=>setFolder({path:fpCur,move:$('#fpmove').checked});
+async function resetFolder(){
+  if(!confirm('Go back to the default folder (next to clipper)? Your campaigns and clips will be moved back too.'))return;
+  setFolder({reset:true,move:true});
 }
 let rrMsg='';
 async function refreshViews(){
@@ -3689,6 +3774,66 @@ def serve_ui(args):
             folder.rmdir()
         return True
 
+    def folder_size(p):
+        n, size = 0, 0
+        try:
+            for f in Path(p).rglob("*"):
+                if f.is_file():
+                    size += f.stat().st_size
+                    if f.suffix.lower() in VIDEO_EXT:
+                        n += 1
+        except OSError:
+            pass
+        return n, size
+
+    def projects_info():
+        camps = []
+        for cid, name, agency in list_campaigns():
+            d = campaign_dir(cid)
+            sn, ss = folder_size(d / "source")
+            cn, cs = folder_size(d / "clips")
+            camps.append({"id": cid, "name": name, "agency": agency, "path": str(d),
+                          "sources": sn, "source_size": ss, "clips": cn, "clips_size": cs})
+        fn, fs = folder_size(out_root)
+        return {"root": str(CAMPAIGN_DIR), "custom": bool(PROJECTS), "free": str(out_root),
+                "free_clips": fn, "free_size": fs, "campaigns": camps,
+                "default": str(Path(__file__).resolve().parent / "campaigns")}
+
+    def allowed_open(p):
+        p = Path(p).resolve()
+        for base in (CAMPAIGN_DIR.resolve(), out_root, Path(__file__).resolve().parent):
+            if p == base or base in p.parents:
+                return True
+        return False
+
+    def open_folder(p):
+        p = Path(p)
+        p.mkdir(parents=True, exist_ok=True)
+        if WINDOWS:
+            os.startfile(str(p))                                   # noqa - Windows only
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def list_dirs(path):
+        """For the folder picker: sub-folders of path (default: home)."""
+        p = Path(path).expanduser() if path else Path.home()
+        if not p.is_dir():
+            p = Path.home()
+        p = p.resolve()
+        try:
+            dirs = sorted([x.name for x in p.iterdir() if x.is_dir() and not x.name.startswith(".")
+                           and not x.name.startswith("$")], key=str.lower)[:400]
+        except OSError:
+            dirs = []
+        drives = []
+        if WINDOWS:
+            import string
+            drives = [f"{c}:\\" for c in string.ascii_uppercase if Path(f"{c}:\\").exists()]
+        return {"path": str(p), "parent": str(p.parent) if p.parent != p else "",
+                "dirs": dirs, "home": str(Path.home()), "drives": drives}
+
     def roots():
         """key -> (clips folder, label). '_' is ~/Clips, others are campaigns."""
         r = {"_": (out_root, "")}
@@ -3901,6 +4046,10 @@ def serve_ui(args):
                 self.send_json(gpu_status())
             elif u.path == "/api/version":
                 self.send_json(version_info(fetch="fetch" in parse_qs(u.query)))
+            elif u.path == "/api/projects":
+                self.send_json(projects_info())
+            elif u.path == "/api/dirs":
+                self.send_json(list_dirs(parse_qs(u.query).get("path", [""])[0]))
             elif u.path == "/api/settings":
                 st = load_settings()
                 self.send_json({"ai": st.get("ai", ""), "ollama_model": st.get("ollama_model", ""),
@@ -4043,6 +4192,88 @@ def serve_ui(args):
                                           if x in ("TikTok", "Instagram Reels", "YouTube Shorts", "X")]
                 save_settings(st)
                 self.send_json({"ok": True, "ai": ai_name()})
+            elif u.path == "/api/open":
+                p = str(d.get("path") or "")
+                if not p or not allowed_open(p):
+                    return self.send_json({"ok": False, "msg": "Can't open that folder"}, 400)
+                try:
+                    open_folder(p)
+                except OSError as e:
+                    return self.send_json({"ok": False, "msg": str(e)})
+                self.send_json({"ok": True})
+            elif u.path == "/api/mkdir":
+                base = Path(str(d.get("path") or ""))
+                name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(d.get("name") or "")).strip(" .")[:60]
+                if not base.is_dir() or not name:
+                    return self.send_json({"ok": False, "msg": "Pick a folder and type a name"})
+                try:
+                    (base / name).mkdir(exist_ok=True)
+                except OSError as e:
+                    return self.send_json({"ok": False, "msg": str(e)})
+                self.send_json({"ok": True, "path": str((base / name).resolve())})
+            elif u.path == "/api/projects/set":
+                if any(j["status"] in ("running", "queued") for j in jobs.values()):
+                    return self.send_json({"ok": False, "msg": "Wait for the running jobs to finish first"})
+                reset = bool(d.get("reset"))
+                new = None if reset else Path(str(d.get("path") or "")).expanduser()
+                if new is not None:
+                    if not new.is_dir():
+                        return self.send_json({"ok": False, "msg": "That folder doesn't exist"})
+                    try:
+                        t = new / ".clipper-test"
+                        t.write_text("ok")
+                        t.unlink()
+                    except OSError:
+                        return self.send_json({"ok": False, "msg": "Clipper can't save into that folder"})
+                    new = new.resolve()
+                moved = 0
+                if d.get("move"):                          # bring existing campaigns + free clips along
+                    dest_c = new or Path(__file__).resolve().parent / "campaigns"
+                    dest_f = (new / "Free clips") if new else Path.home() / "Clips"
+                    try:
+                        dest_c.mkdir(parents=True, exist_ok=True)
+                        if CAMPAIGN_DIR.is_dir() and CAMPAIGN_DIR.resolve() != dest_c.resolve():
+                            for ag in list(CAMPAIGN_DIR.iterdir()):
+                                if not ag.is_dir() or ag.resolve() == dest_c.resolve():
+                                    continue
+                                for c in list(ag.iterdir()):
+                                    if (c / "campaign.json").is_file() and not (dest_c / ag.name / c.name).exists():
+                                        (dest_c / ag.name).mkdir(exist_ok=True)
+                                        shutil.move(str(c), str(dest_c / ag.name / c.name))
+                                        moved += 1
+                        if out_root.is_dir() and out_root.resolve() != dest_f.resolve() \
+                                and dest_f.resolve() not in out_root.resolve().parents:
+                            dest_f.mkdir(parents=True, exist_ok=True)
+                            for x in list(out_root.iterdir()):
+                                if not (dest_f / x.name).exists() and x.resolve() != dest_f.resolve():
+                                    shutil.move(str(x), str(dest_f / x.name))
+                    except OSError as e:
+                        return self.send_json({"ok": False, "msg": f"Moving stopped part-way: {e}"})
+                st = load_settings()
+                if new is None:
+                    st.pop("projects_dir", None)
+                else:
+                    st["projects_dir"] = str(new)
+                save_settings(st)
+                self.send_json({"ok": True, "moved": moved})
+
+                def restart_p():
+                    time.sleep(0.8)
+                    srv.server_close()
+                    argv, skip = [], False
+                    for a in sys.argv:                 # drop -o so the new folder is used
+                        if skip:
+                            skip = False
+                            continue
+                        if a in ("-o", "--out-dir"):
+                            skip = True
+                            continue
+                        argv.append(a)
+                    if WINDOWS:
+                        subprocess.Popen([sys.executable] + argv)
+                        os._exit(0)
+                    os.execv(sys.executable, [sys.executable] + argv)
+                threading.Thread(target=restart_p, daemon=True).start()
             elif u.path == "/api/update":
                 if any(j["status"] in ("running", "queued") for j in jobs.values()):
                     return self.send_json({"ok": False, "msg": "Wait for the running jobs to finish first"})

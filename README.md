@@ -62,6 +62,16 @@ adds a **Clipper** shortcut to the desktop – double-click it and the page open
 while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
 again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
 
+## Your projects folder (📁 Projects)
+The **📁 Projects** tab under the main form shows everything in one place: every campaign with how much
+footage and how many clips it has, plus your *Free clips* (pasted links with no campaign), with 📂 buttons
+to open each folder on the PC.
+
+By default campaigns live in `campaigns/` next to clipper and free clips in `~/Clips`. Press
+**Change folder…** to pick (or make) one main folder instead – e.g. *Documents\Clipping* – and tick
+*Move my existing campaigns & clips into it* to bring everything along. Campaigns then go straight in that
+folder and free clips in its *Free clips* sub-folder. **Back to default** undoes it.
+
 ## Setting up a campaign from a brief
 
 Every campaign has a brief (the rules page on Whop). Clipper needs those rules – music allowed or not,
