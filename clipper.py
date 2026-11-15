@@ -2434,7 +2434,8 @@ function rvShow(){
   const st=$('#rvstamp'), m=rvMark[c.path]; st.className='rvstamp'+(m?' '+m:''); st.textContent=m==='keep'?'⭐ Keeping':m==='drop'?'✕ Dropping':'';
   $('#rvstrip').innerHTML=rvList.map((x,i)=>`<img src="/thumb/${enc(x.path)}?v=${x.v}" class="${i===rvI?'cur ':''}${rvMark[x.path]||''}" onclick="rvI=${i};rvShow()">`).join('');
   const unmarked=rvList.filter(x=>!rvMark[x.path]).length;
-  $('#rvdone').textContent=kept?`Done — keep ${kept}, delete ${rvList.length-kept}`+(unmarked?` (incl. ${unmarked} not marked)`:''):'Done';
+  $('#rvdone').textContent=kept?`Done — keep ${kept}, delete ${rvList.length-kept}`+(unmarked?` (incl. ${unmarked} not marked)`:'')
+    :dropped?`Done — delete ${dropped}`+(unmarked?`, leave ${unmarked} not marked`:''):'Done';
 }
 function rvSet(m){const c=rvList[rvI];rvMark[c.path]=m; if(rvI<rvList.length-1)rvI++; rvShow()}
 $('#rvkeep').onclick=()=>rvSet('keep'); $('#rvdrop').onclick=()=>rvSet('drop');
@@ -2446,10 +2447,12 @@ document.addEventListener('keydown',e=>{ if(!$('#rv').open)return;
   else if(e.key==='ArrowRight')$('#rvnext').click(); else if(e.key==='ArrowLeft')$('#rvprev').click();});
 $('#rvdone').onclick=async()=>{
   const keep=rvList.filter(x=>rvMark[x.path]==='keep');
-  if(!keep.length){ if(confirm('You haven\'t kept any. Close without deleting anything?')){$('#rv').close()} return }
-  const gone=rvList.filter(x=>rvMark[x.path]!=='keep');
+  // with something kept, everything else goes; with nothing kept, only the ones marked Drop go
+  const gone=keep.length?rvList.filter(x=>rvMark[x.path]!=='keep'):rvList.filter(x=>rvMark[x.path]==='drop');
   if(!gone.length){$('#rv').close();return}
-  if(!confirm(`Keep ${keep.length} clip(s) and permanently delete the other ${gone.length}?`))return;
+  const msg=keep.length?`Keep ${keep.length} clip(s) and permanently delete the other ${gone.length}?`
+    :gone.length===rvList.length?`Delete all ${gone.length} clips in this batch?`:`Delete the ${gone.length} clip(s) marked Drop?`;
+  if(!confirm(msg))return;
   $('#rvvideo').pause(); $('#rvvideo').removeAttribute('src');
   await api('/api/deletemany',{paths:gone.map(x=>x.path)}); $('#rv').close(); loadClips();
 };
