@@ -3952,6 +3952,18 @@ def serve_ui(args):
                         plat = d.get("platform") if d.get("platform") in ("TikTok", "Instagram Reels", "YouTube Shorts", "X") else "TikTok"
                         url = str(d.get("url") or "").strip()[:400]
                         same = [x for x in posts if x.get("clip") == rel]
+                        # already logged on this platform (e.g. via the platform button)? update that one instead
+                        dup = next((x for x in same if x.get("platform") == plat and
+                                    (not x.get("url") or not url or x.get("url") == url)), None)
+                        if dup:
+                            if url:
+                                dup["url"] = url
+                            for k in ("views", "likes"):
+                                if num(d.get(k)) is not None:
+                                    dup[k] = num(d.get(k))
+                            dup["updated"] = time.time()
+                            save_results(data)
+                            return self.send_json(results_summary())
                         if len(same) >= 5:
                             return self.send_json({"error": "This clip has already been posted 5 times - campaigns don't allow more"}, 400)
                         meta = dict(side.get("meta") or {})
