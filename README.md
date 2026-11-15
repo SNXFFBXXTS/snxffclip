@@ -155,6 +155,12 @@ campaigns/
       clips/          <- finished clips, captions, POSTING-CHECKLIST.txt
 ```
 
+**Easiest way:** press **+ New** next to the Campaign list in the web page, paste the whole campaign page
+from Whop and press *Read the rules*. Clipper fills in the settings (with your local Ollama AI if you've
+entered a model in the AI box, otherwise by pattern-matching), lists the videos and zips in your Downloads –
+ticking the ones whose names match – and **🚀 Publish campaign** creates the campaign folder and moves the
+ticked footage into it (videos inside zips are unpacked). ✏️ next to the list edits a campaign later.
+
 Campaigns aren't included in this repo – make your own. Drop a `something.json` straight into
 `campaigns/` and it gets filed under its `"agency"` automatically. Example:
 

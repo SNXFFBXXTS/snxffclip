@@ -863,6 +863,289 @@ def make_caption(c, text, n, ollama=None):
     return "\n".join(lines)
 
 
+# ---------- reading a pasted campaign brief ----------
+CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
+                   "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
+                   "hashtags", "max_extra_hashtags", "caption_rules", "example_captions", "checklist"]
+
+
+def _clean_line(t):
+    return re.sub(r"\s+", " ", re.sub(r"^[\s•\-–*✔✅❌⚠️️\d.)]+", "", t)).strip()
+
+
+def parse_brief(text):
+    """Best-effort reading of a campaign brief into campaign settings."""
+    raw = text.replace("\r", "")
+    if raw.count("\n") < 3 and len(raw) > 200:          # pasted as one long line
+        raw = re.sub(r"\s(0\d|[1-9]\d?)\s(?=[A-Z][a-z])", r"\n\1 ", raw)
+    low = raw.lower()
+    lines = [l.strip() for l in raw.split("\n")]
+    nonempty = [l for l in lines if l]
+    c = {k: None for k in CAMPAIGN_FIELDS}
+
+    # name
+    m = re.search(r"campaign brief\s+(.+?)\s+clipping\b", raw, re.I)
+    name = m[1] if m else (nonempty[0] if nonempty else "New campaign")
+    name = re.sub(r"\s*[-–]?\s*clipping\s*$", "", name, flags=re.I).strip()
+    letters = [ch for ch in name if ch.isalpha()]
+    if letters and sum(ch.isupper() for ch in letters) / len(letters) > 0.8:
+        name = name.title().replace(" X ", " x ").replace("Mvp", "MVP").replace("Pfl", "PFL")
+    c["name"] = name[:80] or "New campaign"
+
+    # agency
+    m = (re.search(r"contact the (.+?) team", raw, re.I) or re.search(r"^([A-Z][A-Z ]{2,30}?) CAMPAIGNS", raw, re.M)
+         or re.search(r"([A-Z][\w ]{2,30}?) •", raw))
+    c["agency"] = (m[1].strip().title() if m and m[1].isupper() else m[1].strip()) if m else "Other"
+
+    # platforms
+    plats = []
+    if "tiktok" in low:
+        plats.append("TikTok")
+    if "instagram" in low or "reels" in low:
+        plats.append("Instagram Reels")
+    if "youtube" in low or "shorts" in low:
+        plats.append("YouTube Shorts")
+    if re.search(r"(?<![\w@#])X(?=\s*[•,/|]|\s+and\b|\s*$)", raw, re.M) or "twitter" in low:
+        plats.append("X")
+    c["platforms"] = plats or ["TikTok", "Instagram Reels"]
+
+    # footage link
+    m = re.search(r"https?://\S+", raw)
+    c["source_note"] = f"Use only the supplied content folder: {m[0]}" if m else ""
+
+    # music
+    no_music = re.search(r"(background )?music[^\n.]{0,40}(not allowed|no\b|prohibited|banned|isn'?t allowed)", low) \
+        or re.search(r"(no|any added|❌[^\n]{0,10})\s*(background )?music", low)
+    c["music"] = not no_music
+
+    # lengths
+    m = re.search(r"minimum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds)?", low)
+    mn = int(m[1]) if m else 0
+    m = re.search(r"maximum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds|m|min)?", low)
+    mx = (int(m[1]) * (60 if m[2] and m[2].startswith("m") else 1)) if m else 0
+    lo = max(mn + 2, 15) if mn else 20
+    hi = min(mx, 60) if mx else (45 if mn else 60)
+    c["min_len"], c["len"] = mn, f"{lo}-{max(hi, lo + 10)}"
+    c["mode"], c["captions"] = "blur", True
+
+    # tag / disclosure
+    m = re.search(r"tag\s+(@[\w.]+)", raw, re.I)
+    c["mention"] = m[1] if m else ""
+    c["disclosure"] = "#Ad" if re.search(r"#ad\b|#advertisement|#sponsored|ftc|disclos", low) else ""
+
+    # required line (e.g. "Use one of these lines:" -> next line)
+    req = []
+    for i, l in enumerate(lines):
+        if re.search(r"(use one of these lines|must (include|say|mention) (this|the following)|required line)", l, re.I):
+            for nxt in lines[i + 1:i + 4]:
+                t = _clean_line(nxt)
+                if t and not t.isupper() and len(t) < 90:
+                    req.append(t)
+                    break
+    c["required_lines"] = req
+
+    # on-screen text
+    m = re.search(r"[“\"]([^”\"]{3,60})[”\"][^.\n]{0,60}on-?screen", raw, re.I)
+    if m:
+        c["on_screen"] = m[1]
+    elif req and re.search(r"on-?screen", low):
+        c["on_screen"] = req[0]
+    else:
+        c["on_screen"] = ""
+
+    # keywords
+    kws = []
+    for m in re.finditer(r"mention ([A-Z][\w&]+)(?: or | and |, )([A-Z][\w&]+)", raw):
+        kws += [m[1], m[2]]
+    for m in re.finditer(r"make the (.{3,40}?) the (?:main|central)", raw, re.I):
+        kws.append(m[1].strip())
+    for m in re.finditer(r"[“\"]([^”\"]{3,40})[”\"]", raw):
+        if re.search(r"merger|launch|free|new", m[1], re.I):
+            kws.append(m[1])
+    c["keywords"] = list(dict.fromkeys(k for k in kws if k))[:6]
+
+    # example captions: lines under an EXAMPLES heading
+    ex, grab = [], False
+    for l in lines:
+        t = l.strip()
+        if re.fullmatch(r"(caption )?examples?:?", t, re.I):
+            grab = True
+            continue
+        if grab:
+            if not t:
+                continue
+            if (t.isupper() and len(t) > 3) or t.endswith(":") or re.match(r"(note|same rule|[^\w]*[A-Z ]{4,}$)", t, re.I):
+                grab = False
+                continue
+            t2 = re.sub(r"[#@][\w.]+", "", t).strip(" -–")
+            if 8 < len(t2) < 90:
+                ex.append(t2)
+    c["example_captions"] = list(dict.fromkeys(ex))[:8]
+
+    # caption tone rules
+    tone = [_clean_line(l) for l in lines if re.match(r"\s*(keep it|write|no made-up|no exaggerat)", l, re.I)]
+    c["caption_rules"] = " ".join(tone)[:400] or "Describe what actually happens in the clip. No made-up facts or hype."
+
+    # checklist: ticks/crosses/bullets
+    chk = []
+    for line in raw.split("\n"):
+        for j, part in enumerate(line.split("•")):
+            t = re.sub(r"\s+\d{1,2}\s+[A-Z][\w ]*$", "", part.strip())   # drop "03 Next section"
+            if not t:
+                continue
+            if t.startswith("❌"):
+                chk.append("Don't: " + _clean_line(t))
+            elif t.startswith(("✔", "✅", "⚠")) or (j > 0 and 10 < len(t) < 200):
+                chk.append(_clean_line(t))
+    chk = [x for x in dict.fromkeys(chk) if 6 < len(x) < 160][:25]
+    chk.append("Submit the post link in Whop within 30 minutes of posting")
+    c["checklist"] = chk
+    c["hashtags"], c["max_extra_hashtags"] = [], 3
+    return c
+
+
+def ollama_brief(text, model):
+    """Ask a local AI to read the brief (better than the pattern matcher)."""
+    prompt = (
+        "Read this clipping campaign brief and fill in this JSON. Use only what the brief says.\n"
+        '{"name": short campaign name, "agency": who runs it, "platforms": list from '
+        '["TikTok","Instagram Reels","YouTube Shorts","X"], "source_note": "footage link if given", '
+        '"music": true if background music is allowed else false, "min_len": minimum seconds (0 if none), '
+        '"len": "LOW-HIGH" good clip length range in seconds, "keywords": words clips should mention, '
+        '"on_screen": text that must be on screen ("" if none), "mention": "@account to tag" or "", '
+        '"required_lines": lines that must be in every caption, "disclosure": "#Ad" if paid disclosure needed else "", '
+        '"hashtags": up to 3 relevant hashtags, "caption_rules": one sentence on caption style, '
+        '"example_captions": example captions without hashtags/mentions, "checklist": short rules to check before posting}\n'
+        "Reply ONLY with the JSON.\n\nBRIEF:\n" + text[:8000])
+    try:
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json"}).encode(),
+            headers={"Content-Type": "application/json"})
+        return json.loads(json.loads(urllib.request.urlopen(req, timeout=300).read())["response"])
+    except Exception as e:
+        print(f"  ! ollama couldn't read the brief ({e})")
+        return None
+
+
+def read_brief(text, model=None):
+    c = parse_brief(text)
+    ai = ollama_brief(text, model) if model else None
+    if isinstance(ai, dict):
+        for k in CAMPAIGN_FIELDS:
+            v = ai.get(k)
+            if v not in (None, "", []) and (k not in ("music",) or isinstance(v, bool)):
+                c[k] = v
+        c["_via"] = "ollama"
+    else:
+        c["_via"] = "patterns"
+    return c
+
+
+def clean_campaign(d):
+    """Validate a campaign coming from the web form."""
+    out = {}
+    s_ = lambda v, n=200: str(v or "").strip()[:n]
+    lst = lambda v, n=120, m=30: [s_(x, n) for x in (v if isinstance(v, list) else str(v or "").split("\n"))
+                                  if s_(x, n)][:m]
+    out["name"] = s_(d.get("name"), 80) or "New campaign"
+    out["agency"] = s_(d.get("agency"), 40) or "Other"
+    out["platforms"] = [p for p in lst(d.get("platforms")) if p in ("TikTok", "Instagram Reels", "YouTube Shorts", "X")]
+    out["source_note"] = s_(d.get("source_note"), 300)
+    out["music"] = bool(d.get("music"))
+    try:
+        out["min_len"] = max(0, min(600, int(d.get("min_len") or 0)))
+    except ValueError:
+        out["min_len"] = 0
+    out["len"] = s_(d.get("len"), 10) if re.fullmatch(r"\d{1,3}-\d{1,3}", s_(d.get("len"), 10)) else "20-60"
+    out["mode"] = d.get("mode") if d.get("mode") in ("blur", "crop", "none") else "blur"
+    out["captions"] = d.get("captions", True) is not False
+    out["keywords"] = lst(d.get("keywords"), 40, 10)
+    out["on_screen"] = s_(d.get("on_screen"), 120)
+    m = s_(d.get("mention"), 40)
+    out["mention"] = ("@" + m.lstrip("@")) if m else ""
+    out["required_lines"] = lst(d.get("required_lines"), 120, 5)
+    out["disclosure"] = s_(d.get("disclosure"), 20)
+    out["hashtags"] = ["#" + h.lstrip("#") for h in lst(d.get("hashtags"), 40, 6)]
+    out["max_extra_hashtags"] = 3
+    out["caption_rules"] = s_(d.get("caption_rules"), 500)
+    out["example_captions"] = lst(d.get("example_captions"), 120, 12)
+    out["checklist"] = lst(d.get("checklist"), 200, 30)
+    return out
+
+
+DOWNLOADS = Path.home() / "Downloads"
+
+
+def downloads_list(days=30):
+    """Recent videos and zips in ~/Downloads."""
+    out = []
+    if not DOWNLOADS.is_dir():
+        return out
+    cutoff = __import__("time").time() - days * 86400
+    for f in DOWNLOADS.iterdir():
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if not f.is_file() or st.st_mtime < cutoff:
+            continue
+        ext = f.suffix.lower()
+        if ext in VIDEO_EXT or ext == ".zip":
+            out.append({"path": str(f), "name": f.name, "size": st.st_size, "mtime": st.st_mtime,
+                        "zip": ext == ".zip", "dur": duration_of(f) if ext in VIDEO_EXT else 0})
+    return sorted(out, key=lambda x: x["mtime"], reverse=True)
+
+
+def import_downloads(cid, paths):
+    """Move chosen Downloads videos into a campaign; unpack videos from zips."""
+    import zipfile
+    src_dir = campaign_dir(cid) / "source"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    dl = DOWNLOADS.resolve()
+    for p in paths:
+        f = Path(p).resolve()
+        if dl not in f.parents or not f.is_file():
+            continue
+        if f.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(f) as z:
+                    for info in z.infolist():
+                        name = Path(info.filename).name
+                        if info.is_dir() or Path(name).suffix.lower() not in VIDEO_EXT or name.startswith("."):
+                            continue
+                        dest = src_dir / name
+                        n = 1
+                        while dest.exists():
+                            dest = src_dir / f"{Path(name).stem}-{n}{Path(name).suffix}"
+                            n += 1
+                        with z.open(info) as zin, open(dest, "wb") as zout:
+                            shutil.copyfileobj(zin, zout)
+                        moved.append(dest.name)
+                keep = campaign_dir(cid) / "zips"
+                keep.mkdir(exist_ok=True)
+                shutil.move(str(f), str(keep / f.name))
+            except zipfile.BadZipFile:
+                continue
+        elif f.suffix.lower() in VIDEO_EXT:
+            moved.append(Path(file_into_campaign(str(f), {"id": cid})).name)
+    return moved
+
+
+def save_campaign(c, brief=None, cid=None):
+    if cid and (CAMPAIGN_DIR / cid / "campaign.json").is_file():
+        dest = CAMPAIGN_DIR / cid
+    else:
+        dest = CAMPAIGN_DIR / slug(c["agency"]).lower() / slug(c["name"], 40).lower()
+    for sub in ("source", "clips"):
+        (dest / sub).mkdir(parents=True, exist_ok=True)
+    (dest / "campaign.json").write_text(json.dumps(c, indent=2, ensure_ascii=False))
+    if brief:
+        (dest / "brief.txt").write_text(brief)
+    return dest.relative_to(CAMPAIGN_DIR).as_posix()
+
+
 def write_campaign_files(c, folder, picks, ollama=None):
     for n, p in enumerate(picks):
         cap = make_caption(c, p["text"], n, ollama)
@@ -1182,6 +1465,25 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.cdlg{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:16px;
+  width:min(680px,94vw);max-height:90vh}
+.cdlg::backdrop{background:#000b}
+.cdhead{display:flex;justify-content:space-between;align-items:center;font-size:17px}
+.cdlg textarea{width:100%;background:#0b0c10;border:1px solid var(--line);color:var(--text);border-radius:10px;
+  padding:10px;font:inherit;font-size:13px;margin-top:4px;resize:vertical}
+.cdgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cdgrid>label{font-size:12px;color:var(--dim);display:block}
+.cdgrid>label input[type=text]{margin-top:4px;padding:9px;font-size:14px}
+.cdgrid .wide{grid-column:1/-1}
+.dlbox{margin-top:14px;background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:10px}
+.dlhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.dllist{margin-top:8px;max-height:220px;overflow:auto}
+.dllist label{display:flex;gap:8px;align-items:center;padding:6px 2px;border-bottom:1px solid #1c1f28;font-size:13.5px}
+.dllist label span.m{margin-left:auto;color:var(--dim);font-size:12px;white-space:nowrap}
+.dllist .match{color:var(--acc2);font-size:11px}
+.cdgrid .chk{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text)}
+.chips{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;color:var(--text);font-size:14px}
+@media(max-width:520px){.cdgrid{grid-template-columns:1fr}}
 .bulkbox{margin-top:12px;background:#10131c;border:1px solid #2b3550;border-radius:12px;padding:12px}
 .bulkhead{font-weight:700;font-size:15px}
 .autonote{font-size:12.5px;color:var(--dim);background:#0b0c10;border-radius:10px;padding:10px;margin-top:10px}
@@ -1227,7 +1529,10 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 <form class="card" id="f">
   <input type="text" id="url" placeholder="Paste a YouTube link (or a file path on the PC)" autocomplete="off" required>
   <div style="margin-top:12px"><label style="font-size:12px;color:var(--dim)">Campaign</label>
-    <select id="camp" style="margin-top:5px"><option value="">No campaign (free clipping)</option></select>
+    <div style="display:flex;gap:8px;margin-top:5px">
+      <select id="camp" style="flex:1"><option value="">No campaign (free clipping)</option></select>
+      <button type="button" class="small" id="campedit" title="Edit this campaign" style="display:none">✏️</button>
+      <button type="button" class="small" id="campnew" style="white-space:nowrap">+ New</button></div>
     <div id="campnote" class="s" style="color:var(--acc2);font-size:12px;margin-top:5px"></div>
     <div id="srcbox" style="display:none;margin-top:10px"><label style="font-size:12px;color:var(--dim)">Footage</label>
       <select id="src" style="margin-top:5px"></select>
@@ -1316,6 +1621,44 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
   <div id="rsslot"></div>
   <button type="button" class="go" id="rsapply">Re-render this clip</button>
   <div class="rsnow" style="text-align:center;margin-top:8px">The old version stays until the new one is ready.</div>
+</dialog>
+
+<dialog id="cdlg" class="cdlg">
+ <div class="cdhead"><b id="cdtitle">New campaign</b><button type="button" class="small" id="cdclose">✕</button></div>
+ <div id="cdstep1">
+  <p class="s" style="color:var(--dim);font-size:13px;margin:6px 0 8px">Copy the whole campaign page from Whop (rules, captions, requirements…) and paste it here.</p>
+  <textarea id="cdbrief" rows="12" placeholder="Paste the campaign rules here…"></textarea>
+  <button type="button" class="go" id="cdread">Read the rules</button>
+ </div>
+ <div id="cdstep2" style="display:none">
+  <div id="cdvia" class="s" style="font-size:12px;color:var(--acc2);margin:6px 0"></div>
+  <div class="cdgrid">
+   <label>Campaign name<input type="text" id="cf_name"></label>
+   <label>Agency (who runs it)<input type="text" id="cf_agency"></label>
+   <label class="wide">Platforms
+     <span class="chips" id="cf_platforms">
+       <label><input type="checkbox" value="TikTok"> TikTok</label><label><input type="checkbox" value="Instagram Reels"> Instagram</label>
+       <label><input type="checkbox" value="YouTube Shorts"> YouTube</label><label><input type="checkbox" value="X"> X</label></span></label>
+   <label class="wide">Footage link / note<input type="text" id="cf_source_note"></label>
+   <label class="chk"><input type="checkbox" id="cf_music"> Background music allowed</label>
+   <label>Minimum length (seconds)<input type="text" id="cf_min_len"></label>
+   <label>Clip length range<input type="text" id="cf_len" placeholder="20-60"></label>
+   <label>Tag in caption<input type="text" id="cf_mention" placeholder="@brand"></label>
+   <label>Disclosure hashtag<input type="text" id="cf_disclosure" placeholder="#Ad"></label>
+   <label class="wide">On-screen text (burned into every clip)<input type="text" id="cf_on_screen"></label>
+   <label class="wide">Keywords clips should mention (comma separated)<input type="text" id="cf_keywords"></label>
+   <label class="wide">Extra hashtags (comma separated, max 3)<input type="text" id="cf_hashtags"></label>
+   <label class="wide">Lines every caption must include (one per line)<textarea id="cf_required_lines" rows="2"></textarea></label>
+   <label class="wide">Example captions (one per line)<textarea id="cf_example_captions" rows="4"></textarea></label>
+   <label class="wide">Caption style for the AI<textarea id="cf_caption_rules" rows="2"></textarea></label>
+   <label class="wide">Posting checklist (one per line)<textarea id="cf_checklist" rows="6"></textarea></label>
+  </div>
+  <div class="dlbox"><div class="dlhead"><b>📥 Footage in your Downloads</b>
+    <span class="s" style="font-size:12px;color:var(--dim)">ticked files get moved into this campaign</span></div>
+    <div id="cf_files" class="dllist"></div></div>
+  <div class="row" style="margin-top:10px"><button type="button" class="small" id="cdback">← Paste again</button>
+   <button type="button" class="go" id="cdsave" style="margin:0;flex:1">🚀 Publish campaign</button></div>
+ </div>
 </dialog>
 
 <h2>Jobs</h2>
@@ -1462,6 +1805,7 @@ async function loadCamps(){
 }
 $('#camp').onchange=e=>{
   const c=camps[e.target.value];
+  $('#campedit').style.display=e.target.value?'':'none';
   const noMusic=c&&c.music===false;
   $('#music').disabled=noMusic; if(noMusic){$('#music').value='';$('#volbox').style.display='none'}
   $('#campnote').textContent=c?('Rules applied automatically'+(noMusic?' · music not allowed':'')+
@@ -1518,6 +1862,63 @@ $('#batchgo').onclick=async()=>{
 };
 $('#src').onchange=e=>{ if(e.target.value) $('#url').value=e.target.value; };
 loadCamps();
+/* ---------- campaign builder ---------- */
+let cdEditId='';
+const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist'],
+      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules'];
+const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
+async function cdFiles(){
+  const list=await api('/api/downloads'), box=$('#cf_files');
+  const words=[$('#cf_name').value,$('#cf_keywords').value,$('#cf_agency').value].join(' ').toLowerCase()
+     .split(/[^a-z0-9]+/).filter(w=>w.length>=3&&!STOP.has(w));
+  if(!list.length){box.innerHTML='<div class="s" style="color:var(--dim);font-size:13px;padding:6px">No videos or zips downloaded in the last 30 days.</div>';return}
+  box.innerHTML=list.map(f=>{const n=f.name.toLowerCase(), hit=words.filter(w=>n.includes(w));
+    const mb=(f.size/1048576).toFixed(0)+' MB', d=f.zip?'zip':fmtDur(f.dur);
+    return `<label><input type="checkbox" value="${esc(f.path)}" ${hit.length?'checked':''}>
+      <span>${f.zip?'🗜️':'🎬'} ${esc(f.name)} ${hit.length?`<span class="match">matches "${esc(hit[0])}"</span>`:''}</span>
+      <span class="m">${d} · ${mb}</span></label>`}).join('');
+}
+function cdFill(c){
+  TXTF.forEach(k=>$('#cf_'+k).value=c[k]??'');
+  LISTF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join(', '));
+  LINEF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join('\n'));
+  $('#cf_music').checked=!!c.music;
+  document.querySelectorAll('#cf_platforms input').forEach(i=>i.checked=(c.platforms||[]).includes(i.value));
+  $('#cdstep1').style.display='none'; $('#cdstep2').style.display='';
+  cdFiles();
+}
+function cdRead(){
+  const c={music:$('#cf_music').checked,captions:true,mode:'blur',
+    platforms:[...document.querySelectorAll('#cf_platforms input:checked')].map(i=>i.value)};
+  TXTF.forEach(k=>c[k]=$('#cf_'+k).value.trim());
+  LISTF.forEach(k=>c[k]=$('#cf_'+k).value.split(',').map(x=>x.trim()).filter(Boolean));
+  LINEF.forEach(k=>c[k]=$('#cf_'+k).value.split('\n').map(x=>x.trim()).filter(Boolean));
+  return c;
+}
+$('#campnew').onclick=()=>{cdEditId='';$('#cdtitle').textContent='New campaign';$('#cdbrief').value='';
+  $('#cdstep1').style.display='';$('#cdstep2').style.display='none';$('#cdlg').showModal()};
+$('#campedit').onclick=async()=>{const id=$('#camp').value;if(!id)return;
+  const c=await api('/api/campaign?id='+encodeURIComponent(id)); if(c.error){alert(c.error);return}
+  cdEditId=id;$('#cdtitle').textContent='Edit campaign';$('#cdvia').textContent='';cdFill(c);$('#cdlg').showModal()};
+$('#cdclose').onclick=()=>$('#cdlg').close();
+$('#cdback').onclick=()=>{$('#cdstep1').style.display='';$('#cdstep2').style.display='none'};
+$('#cdread').onclick=async()=>{
+  const b=$('#cdread');b.disabled=true;b.textContent='Reading…';
+  const r=await api('/api/brief',{text:$('#cdbrief').value,ollama:$('#ollama').value.trim()});
+  b.disabled=false;b.textContent='Read the rules';
+  if(r.error){alert(r.error);return}
+  $('#cdvia').textContent=r._via==='ollama'?'✨ Read by your local AI - check it over, then save.'
+    :'Filled in automatically - check every box (especially name, agency, tag and on-screen text), fix anything, then save.';
+  cdFill(r);
+};
+$('#cdsave').onclick=async()=>{
+  const files=[...document.querySelectorAll('#cf_files input:checked')].map(i=>i.value);
+  const b=$('#cdsave'); b.disabled=true; b.textContent=files.length?`Moving ${files.length} file(s)…`:'Saving…';
+  const r=await api('/api/savecampaign',{campaign:cdRead(),id:cdEditId,brief:cdEditId?'':$('#cdbrief').value,files});
+  b.disabled=false; b.textContent='🚀 Publish campaign';
+  if(r.error){alert(r.error);return}
+  $('#cdlg').close(); await loadCamps(); $('#camp').value=r.id; $('#camp').onchange({target:$('#camp')});
+};
 function copyText(t,btn){
   const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
   ta.select(); let ok=false; try{ok=document.execCommand('copy')}catch(e){}
@@ -1982,6 +2383,13 @@ def serve_ui(args):
             elif u.path == "/api/jobs":
                 with lock:
                     self.send_json([public(jobs[i]) for i in reversed(order)])
+            elif u.path == "/api/downloads":
+                self.send_json(downloads_list())
+            elif u.path == "/api/campaign":
+                cid = parse_qs(u.query).get("id", [""])[0]
+                if cid not in [c for c, _, _ in list_campaigns()]:
+                    return self.send_json({"error": "No such campaign"}, 404)
+                self.send_json(json.loads((campaign_dir(cid) / "campaign.json").read_text()))
             elif u.path == "/api/campaigns":
                 out = []
                 for cid, name, agency in list_campaigns():
@@ -2071,6 +2479,22 @@ def serve_ui(args):
                     order.append(jid)
                 q.put(job)
                 self.send_json({"id": jid})
+            elif u.path == "/api/brief":
+                text = str(d.get("text") or "")
+                if len(text.strip()) < 30:
+                    return self.send_json({"error": "Paste the campaign rules first"}, 400)
+                model = str(d.get("ollama") or "")
+                model = model if re.fullmatch(r"[\w.:/-]{1,60}", model) else None
+                self.send_json(read_brief(text[:20000], model))
+            elif u.path == "/api/savecampaign":
+                c = clean_campaign(d.get("campaign") or {})
+                cid = str(d.get("id") or "")
+                if cid and cid not in [x for x, _, _ in list_campaigns()]:
+                    cid = ""
+                new_id = save_campaign(c, str(d.get("brief") or "")[:20000] or None, cid or None)
+                files = [str(x) for x in (d.get("files") or []) if isinstance(x, str)][:200]
+                moved = import_downloads(new_id, files) if files else []
+                self.send_json({"id": new_id, "moved": moved})
             elif u.path == "/api/restyle":
                 rel = str(d.get("path", ""))
                 f = safe(rel)
