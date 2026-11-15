@@ -101,6 +101,18 @@ gets done, with the number of clips based on its length (about one per 2½ minut
 Short videos still give you the number of clips you asked for – extra clips overlap but open on a different line.
 Each run also writes a `clips.txt` you can edit and re-run with `--list clips.txt`.
 
+### Pre-flight checks
+Every clip shows ⚠ warnings before you post: no sound, shorter than the campaign minimum, over 3 minutes,
+caption not from the approved list, missing @tag or #ad, doesn't mention the campaign's keywords, or made
+from low-res footage. Each campaign is also checked against its saved brief (music allowed when the brief
+bans it, word-for-word captions off, on-screen text that's just a hashtag, missing tag/disclosure…).
+
+### AI brain (optional)
+Press **⚙️ AI** in the web page to switch on an AI that reads briefs, picks moments and writes captions:
+- **Ollama** – free, runs on your PC (see below).
+- **Claude** – your own API key from console.anthropic.com (pay as you go; Haiku is the cheap one).
+  The key is stored only in `settings.json` next to clipper.py, which git ignores.
+
 ### Smarter picks with Ollama (optional, free, local AI)
 ```sh
 sudo pacman -S ollama      # or see ollama.com for other distros

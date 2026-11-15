@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -350,6 +351,76 @@ def pick(cands, k, gap=5.0, fill=True):
     return chosen
 
 
+# ======================================================================
+# optional AI brain: local Ollama, or Claude with your own API key
+# ======================================================================
+SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
+
+
+def load_settings():
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(d):
+    SETTINGS_FILE.write_text(json.dumps(d, indent=2))
+    try:
+        SETTINGS_FILE.chmod(0o600)                  # the API key stays private
+    except OSError:
+        pass
+
+
+def ai_name(ollama=None):
+    st = load_settings()
+    if ollama:
+        return f"Ollama ({ollama})"
+    if st.get("ai") == "claude" and st.get("claude_key"):
+        return f"Claude ({st.get('claude_model') or 'claude-haiku-5-5'})"
+    if st.get("ai") == "ollama" and st.get("ollama_model"):
+        return f"Ollama ({st['ollama_model']})"
+    return None
+
+
+def ai_json(prompt, ollama=None, timeout=600):
+    """Ask the configured AI for a JSON answer. None if no AI is set up or it fails."""
+    st = load_settings()
+    if ollama:
+        provider, model = "ollama", ollama
+    elif st.get("ai") == "claude" and st.get("claude_key"):
+        provider, model = "claude", st.get("claude_model") or "claude-haiku-5-5"
+    elif st.get("ai") == "ollama" and st.get("ollama_model"):
+        provider, model = "ollama", st["ollama_model"]
+    else:
+        return None
+    try:
+        if provider == "claude":
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=json.dumps({"model": model, "max_tokens": 2048,
+                                 "messages": [{"role": "user", "content": prompt}]}).encode(),
+                headers={"x-api-key": st["claude_key"], "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"})
+            r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+            text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+        else:
+            req = urllib.request.Request(
+                "http://localhost:11434/api/generate",
+                data=json.dumps({"model": model, "prompt": prompt, "stream": False,
+                                 "format": "json"}).encode(),
+                headers={"Content-Type": "application/json"})
+            text = json.loads(urllib.request.urlopen(req, timeout=timeout).read())["response"]
+        m = re.search(r"\{.*\}", text, re.S)
+        return json.loads(m[0]) if m else None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        print(f"  ! AI ({provider}) said no: {e.code} {detail}")
+    except Exception as e:
+        print(f"  ! AI ({provider}) didn't answer: {e}")
+    return None
+
+
 def ollama_pick(cands, k, model):
     """Let a local LLM choose the k most viral candidates and title them."""
     pool = cands[:max(k * 4, 12)]
@@ -362,14 +433,11 @@ def ollama_pick(cands, k, model):
         f"understandable without context. Give each a short catchy title (max 8 words).\n"
         f'Reply ONLY with JSON: {{"picks":[{{"id":0,"title":"..."}}]}}\n\n{listing}')
     try:
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=json.dumps({"model": model, "prompt": prompt, "stream": False,
-                             "format": "json"}).encode(),
-            headers={"Content-Type": "application/json"})
-        print(f"  asking ollama ({model}) to pick...")
-        resp = json.loads(urllib.request.urlopen(req, timeout=600).read())
-        picks = json.loads(resp["response"])["picks"]
+        print(f"  asking AI - {ai_name(model)} - to pick...")
+        data = ai_json(prompt, ollama=model)
+        if not data:
+            return None
+        picks = data["picks"]
         out = []
         for p in picks:
             idx = int(p["id"])
@@ -379,9 +447,9 @@ def ollama_pick(cands, k, model):
         out = pick(out, k, gap=0)               # drop overlaps
         if out:
             return out
-        print("  ! ollama gave no usable picks, using built-in scoring")
+        print("  ! the AI gave no usable picks, using built-in scoring")
     except Exception as e:
-        print(f"  ! ollama not available ({e}), using built-in scoring")
+        print(f"  ! AI picking failed ({e}), using built-in scoring")
     return None
 
 
@@ -861,12 +929,7 @@ def ollama_caption(c, text, model):
         f"Style examples: {' | '.join(c.get('example_captions', []))}\n"
         f'Reply ONLY with JSON: {{"caption":"..."}}\n\nTranscript of the clip:\n{text[:1500]}')
     try:
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=json.dumps({"model": model, "prompt": prompt, "stream": False,
-                             "format": "json"}).encode(),
-            headers={"Content-Type": "application/json"})
-        cap = json.loads(json.loads(urllib.request.urlopen(req, timeout=300).read())["response"])["caption"]
+        cap = (ai_json(prompt, ollama=model, timeout=300) or {})["caption"]
         cap = re.sub(r"#\w+", "", str(cap)).strip().strip('"')
         return cap if 3 < len(cap) < 120 else None
     except Exception:
@@ -877,7 +940,7 @@ def make_caption(c, text, n, ollama=None):
     if c.get("exact_captions") and c.get("example_captions"):
         caps = c["example_captions"]                 # approved list: copy word for word, nothing added
         return caps[n % len(caps)]
-    line = ollama_caption(c, text, ollama) if ollama else None
+    line = ollama_caption(c, text, ollama) if (ollama or ai_name()) else None
     examples = c.get("example_captions") or ["(write your caption here)"]
     line = line or examples[n % len(examples)]
     m = c.get("mention")
@@ -1076,26 +1139,18 @@ def ollama_brief(text, model):
         'word for word from an approved list (then keep example_captions exactly as written), '
         '"checklist": short rules to check before posting}\n'
         "Reply ONLY with the JSON.\n\nBRIEF:\n" + text[:8000])
-    try:
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json"}).encode(),
-            headers={"Content-Type": "application/json"})
-        return json.loads(json.loads(urllib.request.urlopen(req, timeout=300).read())["response"])
-    except Exception as e:
-        print(f"  ! ollama couldn't read the brief ({e})")
-        return None
+    return ai_json(prompt, ollama=model, timeout=300)
 
 
 def read_brief(text, model=None):
     c = parse_brief(text)
-    ai = ollama_brief(text, model) if model else None
+    ai = ollama_brief(text, model) if (model or ai_name()) else None
     if isinstance(ai, dict):
         for k in CAMPAIGN_FIELDS:
             v = ai.get(k)
-            if v not in (None, "", []) and (k not in ("music",) or isinstance(v, bool)):
+            if v not in (None, "", []) and (k not in ("music", "exact_captions") or isinstance(v, bool)):
                 c[k] = v
-        c["_via"] = "ollama"
+        c["_via"] = ai_name(model)
     else:
         c["_via"] = "patterns"
     return c
@@ -1219,6 +1274,113 @@ def save_campaign(c, brief=None, cid=None):
     if brief:
         (dest / "brief.txt").write_text(brief)
     return dest.relative_to(CAMPAIGN_DIR).as_posix()
+
+
+# ---------- pre-flight checks ----------
+_PROBE = {}
+
+
+def _probe(path: Path):
+    """(has_audio, duration, short side in px) - cached by file + mtime"""
+    try:
+        st = path.stat()
+    except OSError:
+        return (False, 0.0, 0)
+    key = (str(path), st.st_mtime, st.st_size)
+    if key not in _PROBE:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height",
+                            "-show_entries", "format=duration", "-of", "json", str(path)],
+                           capture_output=True, text=True)
+        try:
+            j = json.loads(r.stdout)
+        except ValueError:
+            j = {}
+        streams = j.get("streams", [])
+        vid = [x for x in streams if x.get("codec_type") == "video"]
+        short = min(vid[0].get("width", 0), vid[0].get("height", 0)) if vid else 0
+        _PROBE[key] = (any(x.get("codec_type") == "audio" for x in streams),
+                       float(j.get("format", {}).get("duration") or 0), short)
+    return _PROBE[key]
+
+
+def clip_checks(f: Path, c=None):
+    """Problems worth a look before posting this clip."""
+    out = []
+    audio, dur, _ = _probe(f)
+    c = c or {}
+    if not audio:
+        out.append("No sound" + (" - and music isn't allowed" if c.get("music") is False else ""))
+    if c.get("min_len") and dur and dur < float(c["min_len"]) - 0.2:
+        out.append(f"Only {dur:.0f}s - minimum is {c['min_len']}s")
+    if dur > 180:
+        out.append("Over 3 minutes - won't count as a Short")
+    capf = f.with_suffix(".txt")
+    cap = capf.read_text().strip() if capf.is_file() else ""
+    side = {}
+    sf = f.with_suffix(".clip.json")
+    if sf.is_file():
+        try:
+            side = json.loads(sf.read_text())
+        except ValueError:
+            side = {}
+    if c and cap:
+        if c.get("exact_captions"):
+            if cap not in [x.strip() for x in c.get("example_captions", [])]:
+                out.append("Caption isn't one of the approved ones")
+        else:
+            if c.get("mention") and c["mention"].lower() not in cap.lower():
+                out.append(f"Caption is missing {c['mention']}")
+            if c.get("disclosure") and c["disclosure"].lower() not in cap.lower():
+                out.append(f"Caption is missing {c['disclosure']}")
+    kws = [k.lower() for k in c.get("keywords", []) if k]
+    if kws:
+        said = " ".join(w[2] for w in side.get("words", [])).lower() + " " + cap.lower() \
+            + " " + str(c.get("on_screen") or "").lower()
+        if not any(k in said for k in kws):
+            out.append("Doesn't mention " + " / ".join(c.get("keywords", [])[:3]))
+    src = side.get("source")
+    if src and not is_url(src) and Path(src).is_file():
+        short = _probe(Path(src))[2]
+        if short and short < 720:
+            out.append(f"Low-res source ({short}p) - may look blurry")
+    return out
+
+
+def campaign_checks(cid):
+    """Does the campaign's setup match its brief? -> list of (level, message)"""
+    out = []
+    d = campaign_dir(cid)
+    try:
+        c = json.loads((d / "campaign.json").read_text())
+    except (OSError, ValueError):
+        return [("error", "Campaign file can't be read")]
+    if re.fullmatch(r"\s*[#@][\w.]+\s*", str(c.get("on_screen") or "")):
+        out.append(("warn", f"On-screen text is just \"{c['on_screen']}\" - probably a mistake"))
+    if c.get("exact_captions") and not c.get("example_captions"):
+        out.append(("error", "Word-for-word captions is on, but there are no approved captions listed"))
+    if not c.get("platforms"):
+        out.append(("warn", "No platforms ticked"))
+    bf = d / "brief.txt"
+    if bf.is_file():
+        b = parse_brief(bf.read_text())
+        if c.get("music") and not b["music"]:
+            out.append(("warn", "Music is allowed here, but the brief looks like it bans it"))
+        if b["exact_captions"] and not c.get("exact_captions"):
+            out.append(("warn", "The brief has an approved caption list, but word-for-word is off"))
+        if b["mention"] and not c.get("mention") and not c.get("exact_captions"):
+            out.append(("warn", f"The brief asks you to tag {b['mention']}"))
+        if b["min_len"] and int(c.get("min_len") or 0) < b["min_len"]:
+            out.append(("warn", f"The brief's minimum length is {b['min_len']}s"))
+        if b["disclosure"] and not c.get("disclosure") and not c.get("exact_captions"):
+            out.append(("warn", "The brief needs a disclosure like #ad"))
+    vids = [f for f in (d / "source").iterdir() if f.suffix.lower() in VIDEO_EXT] if (d / "source").is_dir() else []
+    if not vids:
+        out.append(("info", "No footage in this campaign yet"))
+    elif c.get("music") is False:
+        silent = sum(1 for f in vids if not _probe(f)[0])
+        if silent:
+            out.append(("info", f"{silent} of {len(vids)} videos have no sound (and music isn't allowed) - they're ranked last"))
+    return out
 
 
 def write_campaign_files(c, folder, picks, ollama=None):
@@ -1348,7 +1510,7 @@ def auto_mode(args):
             dur = segs[-1]["end"] - segs[0]["start"]
             k = max(2, min(10, round(dur / 150)))
             print(f"  {short_ts(dur)} of speech - making {k} clips")
-    picks = ollama_pick(cands, k, args.ollama) if args.ollama else None
+    picks = ollama_pick(cands, k, args.ollama) if (args.ollama or ai_name()) else None
     picks = picks or pick(cands, k)
     for c in picks:
         if not c.get("title"):
@@ -1622,6 +1784,11 @@ pre{white-space:pre-wrap;font-size:11.5px;background:#0b0c10;padding:10px;border
   background:linear-gradient(90deg,var(--acc),#ff6a3d);color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.warns{padding:4px 8px 0}
+.warn{font-size:11px;color:#ffb03d;line-height:1.35}
+.cchk{margin-top:6px;font-size:12.5px}.cchk div{margin-top:2px}
+.cchk .warn,.cchk .error{color:#ffb03d}.cchk .error{color:var(--acc)}.cchk .info{color:var(--dim)}.cchk .ok{color:var(--ok)}
+.gwarn{color:#ffb03d;font-size:12px}
 .tabs{display:flex;gap:6px;margin:26px 0 10px}
 .tab{background:none;border:1px solid var(--line);color:var(--dim);border-radius:20px;padding:6px 14px;font:inherit;font-size:13px}
 .tab.on{background:var(--line);color:var(--text)}
@@ -1708,7 +1875,26 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 .pv{position:absolute;left:8px;right:8px;text-align:center;font-weight:800;line-height:1.15}
 .pvmatch{position:absolute;top:6px;right:6px;font-size:9px;background:#0009;color:#ffb03d;padding:2px 5px;border-radius:5px;display:none}
 </style></head><body>
-<h1>✂️ <span>Clipper</span></h1>
+<h1>✂️ <span>Clipper</span><button type="button" class="small" id="aibtn" style="margin-left:auto">⚙️ AI</button></h1>
+<dialog id="aidlg" class="cdlg">
+ <div class="cdhead"><b>AI brain</b><button type="button" class="small" id="aiclose">✕</button></div>
+ <p class="s" style="color:var(--dim);font-size:13px;margin:8px 0">Optional. With an AI switched on, clipper uses it to read
+   campaign briefs, pick the best moments and write captions. Without one it uses its built-in rules.</p>
+ <div class="seg" id="aiprov"><button type="button" data-v="">Off</button><button type="button" data-v="ollama">Ollama (free, on this PC)</button>
+   <button type="button" data-v="claude">Claude (API key)</button></div>
+ <div id="ai_ollama" class="cdgrid" style="margin-top:12px"><label class="wide">Ollama model
+   <input type="text" id="ai_om" placeholder="e.g. llama3.2"></label>
+   <div class="wide s" style="font-size:12px;color:var(--dim)">Install: <code>sudo pacman -S ollama</code>, <code>sudo systemctl enable --now ollama</code>,
+   <code>ollama pull llama3.2</code></div></div>
+ <div id="ai_claude" class="cdgrid" style="margin-top:12px"><label class="wide">API key <span id="ai_haskey" style="color:var(--ok)"></span>
+   <input type="text" id="ai_key" placeholder="sk-ant-… (leave empty to keep the saved key)" autocomplete="off"></label>
+   <label class="wide">Model<select id="ai_cm"><option value="claude-haiku-5-5">Claude Haiku 5.5 - cheapest, fast</option>
+     <option value="claude-sonnet-5-5">Claude Sonnet 5.5 - smarter, costs more</option></select></label>
+   <div class="wide s" style="font-size:12px;color:var(--dim)">Get a key at console.anthropic.com (pay as you go). It's saved only on this PC, in settings.json.</div></div>
+ <div class="row" style="margin-top:12px"><button type="button" class="small" id="aitest">Test</button>
+   <span id="aimsg" class="s" style="font-size:13px;align-self:center"></span>
+   <button type="button" class="go" id="aisave" style="margin:0;flex:1">Save</button></div>
+</dialog>
 
 <form class="card" id="f">
   <input type="text" id="url" placeholder="Paste a YouTube link (or a file path on the PC)" autocomplete="off" required>
@@ -1718,6 +1904,7 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
       <button type="button" class="small" id="campedit" title="Edit this campaign" style="display:none">✏️</button>
       <button type="button" class="small" id="campnew" style="white-space:nowrap">+ New</button></div>
     <div id="campnote" class="s" style="color:var(--acc2);font-size:12px;margin-top:5px"></div>
+    <div id="campchk" class="cchk"></div>
     <div id="srcbox" style="display:none;margin-top:10px"><label style="font-size:12px;color:var(--dim)">Footage</label>
       <select id="src" style="margin-top:5px"></select>
       <div id="bulkbox" class="bulkbox" style="display:none">
@@ -1792,7 +1979,7 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
     <div class="field" id="volbox" style="display:none"><label>Music volume: <b id="mvv">15</b>%</label>
       <input type="range" id="mvol" min="5" max="50" value="15"></div>
   </div>
-  <details><summary>AI picking (Ollama)</summary>
+  <details><summary>Use a specific Ollama model for this run (optional)</summary>
     <div style="margin-top:8px">
       <input type="text" id="ollama" placeholder="model name, e.g. llama3.1 (leave empty to skip)">
     </div></details>
@@ -2008,6 +2195,7 @@ async function loadCamps(){
 $('#camp').onchange=e=>{
   const c=camps[e.target.value];
   $('#campedit').style.display=e.target.value?'':'none';
+  campCheck();
   const noMusic=c&&c.music===false;
   $('#music').disabled=noMusic; if(noMusic){$('#music').value='';$('#volbox').style.display='none'}
   $('#campnote').textContent=c?('Rules applied automatically'+(noMusic?' · music not allowed':'')+
@@ -2064,6 +2252,27 @@ $('#batchgo').onclick=async()=>{
 };
 $('#src').onchange=e=>{ if(e.target.value) $('#url').value=e.target.value; };
 loadCamps();
+async function campCheck(){
+  const id=$('#camp').value, el=$('#campchk'); if(!id){el.innerHTML='';return}
+  const r=await api('/api/campaigncheck?id='+encodeURIComponent(id));
+  const probs=r.filter(x=>x[0]!=='info');
+  el.innerHTML=(probs.length?'':'<div class="ok">✅ Campaign settings match the brief</div>')+
+    r.map(([l,m])=>`<div class="${l}">${l==='info'?'ℹ️':'⚠'} ${esc(m)}</div>`).join('');
+}
+/* ---------- AI settings ---------- */
+let aiProv='';
+function aiShow(){document.querySelectorAll('#aiprov button').forEach(b=>b.classList.toggle('on',b.dataset.v===aiProv));
+  $('#ai_ollama').style.display=aiProv==='ollama'?'':'none'; $('#ai_claude').style.display=aiProv==='claude'?'':'none'}
+$('#aiprov').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;aiProv=b.dataset.v;aiShow()});
+$('#aibtn').onclick=async()=>{const s=await api('/api/settings');aiProv=s.ai||'';$('#ai_om').value=s.ollama_model||'';
+  $('#ai_cm').value=s.claude_model||'claude-haiku-5-5';$('#ai_key').value='';$('#ai_haskey').textContent=s.has_key?'✓ key saved':'';
+  $('#aimsg').textContent='';aiShow();$('#aidlg').showModal()};
+$('#aiclose').onclick=()=>$('#aidlg').close();
+async function aiSave(){return api('/api/settings',{ai:aiProv,ollama_model:$('#ai_om').value.trim(),claude_model:$('#ai_cm').value,claude_key:$('#ai_key').value.trim()})}
+$('#aisave').onclick=async()=>{const r=await aiSave();$('#aimsg').textContent=r.ai?'Using '+r.ai:'AI off';setTimeout(()=>$('#aidlg').close(),700)};
+$('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testing…';const r=await api('/api/aitest',{});
+  $('#aimsg').textContent=r.msg;$('#aimsg').style.color=r.ok?'var(--ok)':'var(--acc)'};
+
 /* ---------- campaign builder ---------- */
 let cdEditId='';
 const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist'],
@@ -2117,7 +2326,7 @@ $('#cdread').onclick=async()=>{
   const r=await api('/api/brief',{text:$('#cdbrief').value,ollama:$('#ollama').value.trim()});
   b.disabled=false;b.textContent='Read the rules';
   if(r.error){alert(r.error);return}
-  $('#cdvia').textContent=r._via==='ollama'?'✨ Read by your local AI - check it over, then save.'
+  $('#cdvia').textContent=r._via&&r._via!=='patterns'?`✨ Read by ${r._via} - check it over, then publish.`
     :'Filled in automatically - check every box (especially name, agency, tag and on-screen text), fix anything, then save.';
   cdFill(r);
 };
@@ -2128,6 +2337,7 @@ $('#cdsave').onclick=async()=>{
   b.disabled=false; b.textContent='🚀 Publish campaign';
   if(r.error){alert(r.error);return}
   $('#cdlg').close(); await loadCamps(); $('#camp').value=r.id; $('#camp').onchange({target:$('#camp')});
+  loadClips();
 };
 function copyText(t,btn){
   const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
@@ -2193,13 +2403,15 @@ async function loadClips(){
   lastGroups=groups;
   el.innerHTML=groups.map((g,gi)=>`
     <div class="group"><div class="gname"><span>${esc(g.name)}</span>
-      <span style="display:flex;gap:8px;align-items:center"><span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
+      <span style="display:flex;gap:8px;align-items:center">${(()=>{const n=g.clips.filter(c=>(c.checks||[]).length).length;return n?`<span class="gwarn">⚠ ${n} need a look</span>`:''})()}
+      <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
       <button class="gbtn" onclick="review(${gi})">🎬 Review</button></span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
           <div class="ov"></div><div class="badge">✓ Restyled</div></div>
         <div class="n" title="${esc(c.name)}">${esc(c.name)}</div>
+        ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
         ${c.caption?`<button class="capbtn" onclick="copyText(capStore['${esc(c.path).replace(/'/g,"\\'")}'],this)">Copy caption</button>`:''}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
@@ -2216,7 +2428,7 @@ function review(gi){
 function rvShow(){
   const c=rvList[rvI]; if(!c)return;
   const v=$('#rvvideo'); v.src=`/clips/${enc(c.path)}?v=${c.v}`; v.play().catch(()=>{});
-  $('#rvcap').textContent=c.caption||c.name;
+  $('#rvcap').innerHTML=esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
   const kept=Object.values(rvMark).filter(x=>x==='keep').length, dropped=Object.values(rvMark).filter(x=>x==='drop').length;
   $('#rvpos').textContent=`Clip ${rvI+1} of ${rvList.length} · ⭐ ${kept} kept · ✕ ${dropped} dropped`;
   const st=$('#rvstamp'), m=rvMark[c.path]; st.className='rvstamp'+(m?' '+m:''); st.textContent=m==='keep'?'⭐ Keeping':m==='drop'?'✕ Dropping':'';
@@ -2383,7 +2595,7 @@ def serve_ui(args):
             done, total = to_seconds(m[1]), to_seconds(m[2]) or 1
             job["progress"] = P(job, 10 + 50 * min(done / total, 1))
             job["stage"] = f"Transcribing {m[1]} / {m[2]}"
-        elif "asking ollama" in line:
+        elif "asking AI" in line:
             job["stage"], job["progress"] = "AI is picking the best bits…", P(job, 61)
         elif m := re.search(r"top (\d+) moments", line):
             job["kv"] = int(m[1])
@@ -2551,6 +2763,12 @@ def serve_ui(args):
         for key, (root, label) in roots().items():
             if not root.is_dir():
                 continue
+            camp = {}
+            if key != "_":
+                try:
+                    camp = json.loads((campaign_dir(key.replace("~", "/")) / "campaign.json").read_text())
+                except (OSError, ValueError):
+                    camp = {}
             for f in root.rglob("*.mp4"):
                 rel = f.relative_to(root)
                 if len(rel.parts) > 2:
@@ -2561,6 +2779,7 @@ def serve_ui(args):
                 groups.setdefault(g, []).append(
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
                      "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
+                     "checks": clip_checks(f, camp),
                      "caption": cap.read_text().strip() if cap.is_file() else ""})
         out = []
         for name, clips in groups.items():
@@ -2704,6 +2923,16 @@ def serve_ui(args):
             elif u.path == "/api/jobs":
                 with lock:
                     self.send_json([public(jobs[i]) for i in reversed(order)])
+            elif u.path == "/api/settings":
+                st = load_settings()
+                self.send_json({"ai": st.get("ai", ""), "ollama_model": st.get("ollama_model", ""),
+                                "claude_model": st.get("claude_model", "claude-haiku-5-5"),
+                                "has_key": bool(st.get("claude_key"))})
+            elif u.path == "/api/campaigncheck":
+                cid = parse_qs(u.query).get("id", [""])[0]
+                if cid not in [x for x, _, _ in list_campaigns()]:
+                    return self.send_json([])
+                self.send_json(campaign_checks(cid))
             elif u.path == "/api/history":
                 try:
                     self.send_json(json.loads(hist_file.read_text()) if hist_file.is_file() else [])
@@ -2805,6 +3034,30 @@ def serve_ui(args):
                     order.append(jid)
                 q.put(job)
                 self.send_json({"id": jid})
+            elif u.path == "/api/settings":
+                st = load_settings()
+                if d.get("ai") in ("", "ollama", "claude"):
+                    st["ai"] = d["ai"]
+                m = str(d.get("ollama_model") or "")
+                if re.fullmatch(r"[\w.:/-]{0,60}", m):
+                    st["ollama_model"] = m
+                cm = str(d.get("claude_model") or "")
+                if re.fullmatch(r"[\w.:-]{1,60}", cm):
+                    st["claude_model"] = cm
+                if d.get("claude_key"):
+                    st["claude_key"] = str(d["claude_key"]).strip()[:300]
+                if d.get("forget_key"):
+                    st.pop("claude_key", None)
+                save_settings(st)
+                self.send_json({"ok": True, "ai": ai_name()})
+            elif u.path == "/api/aitest":
+                name = ai_name()
+                if not name:
+                    return self.send_json({"ok": False, "msg": "No AI is switched on"})
+                r = ai_json('Reply with exactly this JSON: {"ok": true}', timeout=120)
+                self.send_json({"ok": bool(r and r.get("ok")), "msg": f"{name} answered ✓" if r
+                                else f"{name} didn't answer - " + ("check the API key and model, and that you have credit"
+                                      if name.startswith("Claude") else "is Ollama running and the model pulled?")})
             elif u.path == "/api/brief":
                 text = str(d.get("text") or "")
                 if len(text.strip()) < 30:
