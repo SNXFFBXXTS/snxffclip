@@ -168,6 +168,10 @@ entered a model in the AI box, otherwise by pattern-matching), lists the videos 
 ticking the ones whose names match – and **🚀 Publish campaign** creates the campaign folder and moves the
 ticked footage into it (videos inside zips are unpacked). ✏️ next to the list edits a campaign later.
 
+If a brief has an **approved captions** list that must be copied word for word, clipper spots it and the
+*Captions must be copied word for word* box is ticked – each clip then gets one approved caption exactly
+as written, with nothing added.
+
 Campaigns aren't included in this repo – make your own. Drop a `something.json` straight into
 `campaigns/` and it gets filed under its `"agency"` automatically. Example:
 

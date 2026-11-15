@@ -874,6 +874,9 @@ def ollama_caption(c, text, model):
 
 
 def make_caption(c, text, n, ollama=None):
+    if c.get("exact_captions") and c.get("example_captions"):
+        caps = c["example_captions"]                 # approved list: copy word for word, nothing added
+        return caps[n % len(caps)]
     line = ollama_caption(c, text, ollama) if ollama else None
     examples = c.get("example_captions") or ["(write your caption here)"]
     line = line or examples[n % len(examples)]
@@ -892,7 +895,8 @@ def make_caption(c, text, n, ollama=None):
 # ---------- reading a pasted campaign brief ----------
 CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
-                   "hashtags", "max_extra_hashtags", "caption_rules", "example_captions", "checklist"]
+                   "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
+                   "exact_captions", "checklist"]
 
 
 def _clean_line(t):
@@ -957,6 +961,9 @@ def parse_brief(text):
     # tag / disclosure
     m = re.search(r"tag\s+(@[\w.]+)", raw, re.I)
     c["mention"] = m[1] if m else ""
+    if not c["mention"]:
+        m = re.search(r"includes? (@[\w.]+)", raw, re.I)
+        c["mention"] = m[1] if m else ""
     c["disclosure"] = "#Ad" if re.search(r"#ad\b|#advertisement|#sponsored|ftc|disclos", low) else ""
 
     # required line (e.g. "Use one of these lines:" -> next line)
@@ -965,6 +972,8 @@ def parse_brief(text):
         if re.search(r"(use one of these lines|must (include|say|mention) (this|the following)|required line)", l, re.I):
             for nxt in lines[i + 1:i + 4]:
                 t = _clean_line(nxt)
+                if t and re.fullmatch(r"(#\w+\s*)+", t):    # just a hashtag (e.g. #ad) - not a line
+                    break
                 if t and not t.isupper() and len(t) < 90:
                     req.append(t)
                     break
@@ -1008,6 +1017,26 @@ def parse_brief(text):
                 ex.append(t2)
     c["example_captions"] = list(dict.fromkeys(ex))[:8]
 
+    # approved captions that must be copied word for word
+    appr, grab = [], False
+    for l in lines:
+        t = l.strip()
+        if re.fullmatch(r"approved captions?:?", t, re.I):
+            grab = True
+            continue
+        if grab:
+            if not t:
+                if appr:
+                    grab = False
+                continue
+            if t.isupper() or t.endswith(":"):
+                grab = False
+                continue
+            appr.append(t)
+    c["exact_captions"] = bool(appr) and bool(re.search(r"word for word|approved (list|caption)|caption not from", low))
+    if c["exact_captions"]:
+        c["example_captions"] = appr[:20]
+
     # caption tone rules
     tone = [_clean_line(l) for l in lines if re.match(r"\s*(keep it|write|no made-up|no exaggerat)", l, re.I)]
     c["caption_rules"] = " ".join(tone)[:400] or "Describe what actually happens in the clip. No made-up facts or hype."
@@ -1024,6 +1053,8 @@ def parse_brief(text):
             elif t.startswith(("✔", "✅", "⚠")) or (j > 0 and 10 < len(t) < 200):
                 chk.append(_clean_line(t))
     chk = [x for x in dict.fromkeys(chk) if 6 < len(x) < 160][:25]
+    if re.search(r"paid partnership", low):
+        chk.append("Turn on the platform's paid partnership label")
     chk.append("Submit the post link in Whop within 30 minutes of posting")
     c["checklist"] = chk
     c["hashtags"], c["max_extra_hashtags"] = [], 3
@@ -1041,7 +1072,9 @@ def ollama_brief(text, model):
         '"on_screen": text that must be on screen ("" if none), "mention": "@account to tag" or "", '
         '"required_lines": lines that must be in every caption, "disclosure": "#Ad" if paid disclosure needed else "", '
         '"hashtags": up to 3 relevant hashtags, "caption_rules": one sentence on caption style, '
-        '"example_captions": example captions without hashtags/mentions, "checklist": short rules to check before posting}\n'
+        '"example_captions": example or approved captions, "exact_captions": true if captions must be copied '
+        'word for word from an approved list (then keep example_captions exactly as written), '
+        '"checklist": short rules to check before posting}\n'
         "Reply ONLY with the JSON.\n\nBRIEF:\n" + text[:8000])
     try:
         req = urllib.request.Request(
@@ -1095,7 +1128,8 @@ def clean_campaign(d):
     out["hashtags"] = ["#" + h.lstrip("#") for h in lst(d.get("hashtags"), 40, 6)]
     out["max_extra_hashtags"] = 3
     out["caption_rules"] = s_(d.get("caption_rules"), 500)
-    out["example_captions"] = lst(d.get("example_captions"), 120, 12)
+    out["example_captions"] = lst(d.get("example_captions"), 200, 25)
+    out["exact_captions"] = bool(d.get("exact_captions"))
     out["checklist"] = lst(d.get("checklist"), 200, 30)
     return out
 
@@ -1235,6 +1269,8 @@ def visual_moments(src, lo, hi, target):
     lz[:m] = np.clip(loud[:m], -2, 3) / 3
     act = motion / (motion.mean() + 1e-6) * 0.7 + lz * 0.3      # activity per half-second
     base = float(np.clip(motion.mean() * 12, 0, 2))              # how lively the whole video is
+    if not has_audio(src):
+        base -= 1.5                                               # silent clips perform badly
     stretch = min(10.0, hi * 0.25)
     if dur <= hi + stretch:                                       # short video: use all of it
         return [{"i": 0, "j": 0, "start": 0.0, "end": dur, "text": "", "visual": True,
@@ -1398,6 +1434,15 @@ def bulk_mode(args):
         die(f"no videos in {folder}")
     lo, hi = (float(x) for x in args.len.split("-"))
     target = args.target or (lo + hi) / 2
+    seen, uniq = {}, []
+    for v in vids:                                   # "Clip 03.mp4" and "Clip 03 (1).mp4" twice
+        key = (v.stat().st_size, round(duration_of(v), 1))
+        if key in seen:
+            print(f"  skipping {v.name} (same as {seen[key]})")
+            continue
+        seen[key] = v.name
+        uniq.append(v)
+    vids = uniq
     print(f"> bulk scrape: {len(vids)} videos")
     pool, words_of, speech, visual = [], {}, 0.0, 0.0
     for i, v in enumerate(vids, 1):
@@ -1788,7 +1833,8 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
    <label class="wide">Keywords clips should mention (comma separated)<input type="text" id="cf_keywords"></label>
    <label class="wide">Extra hashtags (comma separated, max 3)<input type="text" id="cf_hashtags"></label>
    <label class="wide">Lines every caption must include (one per line)<textarea id="cf_required_lines" rows="2"></textarea></label>
-   <label class="wide">Example captions (one per line)<textarea id="cf_example_captions" rows="4"></textarea></label>
+   <label class="chk wide"><input type="checkbox" id="cf_exact"> Captions must be copied <b>word for word</b> from the list below (nothing added)</label>
+   <label class="wide">Example / approved captions (one per line)<textarea id="cf_example_captions" rows="4"></textarea></label>
    <label class="wide">Caption style for the AI<textarea id="cf_caption_rules" rows="2"></textarea></label>
    <label class="wide">Posting checklist (one per line)<textarea id="cf_checklist" rows="6"></textarea></label>
   </div>
@@ -2046,13 +2092,13 @@ function cdFill(c){
   TXTF.forEach(k=>$('#cf_'+k).value=c[k]??'');
   LISTF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join(', '));
   LINEF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join('\n'));
-  $('#cf_music').checked=!!c.music;
+  $('#cf_music').checked=!!c.music; $('#cf_exact').checked=!!c.exact_captions;
   document.querySelectorAll('#cf_platforms input').forEach(i=>i.checked=(c.platforms||[]).includes(i.value));
   $('#cdstep1').style.display='none'; $('#cdstep2').style.display='';
   cdFiles();
 }
 function cdRead(){
-  const c={music:$('#cf_music').checked,captions:true,mode:'blur',
+  const c={music:$('#cf_music').checked,exact_captions:$('#cf_exact').checked,captions:true,mode:'blur',
     platforms:[...document.querySelectorAll('#cf_platforms input:checked')].map(i=>i.value)};
   TXTF.forEach(k=>c[k]=$('#cf_'+k).value.trim());
   LISTF.forEach(k=>c[k]=$('#cf_'+k).value.split(',').map(x=>x.trim()).filter(Boolean));
