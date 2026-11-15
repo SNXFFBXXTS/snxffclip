@@ -2569,46 +2569,51 @@ input[type=color]{width:100%;height:36px;border:1px solid var(--line);border-rad
 .pv{position:absolute;left:8px;right:8px;text-align:center;font-weight:800;line-height:1.15}
 .pvmatch{position:absolute;top:6px;right:6px;font-size:9px;background:#0009;color:#ffb03d;padding:2px 5px;border-radius:5px;display:none}
 
-/* ===== theme: San Jose Sharks (dark, terminal / ASCII) ===== */
+/* ===== terminal-style themes: San Jose Sharks + SNXFFBXXTS (kitty prompt colours) ===== */
 .themepick{width:auto;font-size:12px;padding:5px 8px;border-radius:8px}
 html[data-theme=sharks]{--bg:#030708;--card:#081113;--line:#0f3a3e;--text:#cfeeed;--dim:#5b8587;
-  --acc:#00a3ad;--acc2:#e57200;--acc3:#007f88;--ok:#2fd6a3;--field:#010405}
-html[data-theme=sharks] body{font:14px/1.5 "JetBrains Mono","Fira Code","Cascadia Mono","DejaVu Sans Mono",Consolas,monospace;
-  letter-spacing:.2px}
-html[data-theme=sharks] *{border-radius:0 !important}
-html[data-theme=sharks] button,html[data-theme=sharks] input,html[data-theme=sharks] select,
-html[data-theme=sharks] textarea,html[data-theme=sharks] .go{font-family:inherit !important}
-html[data-theme=sharks] body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;
-  background:repeating-linear-gradient(0deg,#0000 0 2px,#00a3ad08 2px 3px)}
-html[data-theme=sharks] h1{font-weight:700;letter-spacing:0}
-html[data-theme=sharks] h1 span{background:none;color:var(--acc);-webkit-background-clip:initial;
-  text-shadow:0 0 8px #00a3ad88}
-html[data-theme=sharks] h1 span::before{content:"[ ";color:var(--acc2)}
-html[data-theme=sharks] h1 span::after{content:" ]_";color:var(--acc2);animation:blink 1.1s steps(1) infinite}
+  --acc:#00a3ad;--acc2:#e57200;--acc3:#007f88;--ok:#2fd6a3;--field:#010405;
+  --onacc:#001214;--glow:#00a3ad66;--scan:#00a3ad08;--bulkbg:#04191b;--segon:#06363a;--readybg:#05282b;--pre:#7fd8d4;
+  --hot:#e57200;--title:var(--acc);--brk:var(--acc2)}
+html[data-theme=snxff]{--bg:#020418;--card:#060a24;--line:#16234a;--text:#e6fff9;--dim:#5e6a7d;
+  --acc:#00ffcc;--acc2:#ff69b4;--acc3:#56e0d0;--ok:#00ffcc;--field:#010312;
+  --onacc:#020418;--glow:#00ffcc55;--scan:#00ffcc07;--bulkbg:#081036;--segon:#0d2a3a;--readybg:#062a2a;--pre:#56e0d0;
+  --hot:#ff5f00;--title:#ff69b4;--brk:#00ffcc;--gold:#cecb00}
+:is(html[data-theme=sharks],html[data-theme=snxff]) body{font:14px/1.5 "JetBrains Mono","Fira Code","Cascadia Mono","DejaVu Sans Mono",Consolas,monospace;letter-spacing:.2px}
+:is(html[data-theme=sharks],html[data-theme=snxff]) *{border-radius:0 !important}
+:is(html[data-theme=sharks],html[data-theme=snxff]) button,:is(html[data-theme=sharks],html[data-theme=snxff]) input,:is(html[data-theme=sharks],html[data-theme=snxff]) select,:is(html[data-theme=sharks],html[data-theme=snxff]) textarea,:is(html[data-theme=sharks],html[data-theme=snxff]) .go{font-family:inherit !important}
+:is(html[data-theme=sharks],html[data-theme=snxff]) body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,#0000 0 2px,var(--scan) 2px 3px)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) h1{font-weight:700;letter-spacing:0}
+:is(html[data-theme=sharks],html[data-theme=snxff]) h1 span{background:none;color:var(--title);-webkit-background-clip:initial;text-shadow:0 0 8px var(--glow)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) h1 span::before{content:"[ ";color:var(--brk)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) h1 span::after{content:" ]_";color:var(--brk);animation:blink 1.1s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
-html[data-theme=sharks] .card,html[data-theme=sharks] .job,html[data-theme=sharks] .clip,
-html[data-theme=sharks] .bulkbox,html[data-theme=sharks] .projroot,html[data-theme=sharks] .group,
-html[data-theme=sharks] .hist{border-style:dashed !important;border-color:var(--line) !important}
-html[data-theme=sharks] .bulkbox{background:#04191b !important}
-html[data-theme=sharks] .go,html[data-theme=sharks] #bulkgo{background:var(--acc) !important;color:#001214 !important;
-  text-transform:uppercase;letter-spacing:1px;box-shadow:0 0 0 1px var(--acc),0 0 14px #00a3ad55}
-html[data-theme=sharks] .go::before{content:"> "}
-html[data-theme=sharks] .capbtn,html[data-theme=sharks] .rvkeep{background:var(--acc2) !important;color:#140800 !important}
-html[data-theme=sharks] .tab::before{content:"[ "}html[data-theme=sharks] .tab::after{content:" ]"}
-html[data-theme=sharks] .tab.on{background:var(--acc);color:#001214}
-html[data-theme=sharks] .bar i{background:repeating-linear-gradient(90deg,var(--acc) 0 8px,#0000 8px 10px)}
-html[data-theme=sharks] .seg button.on,html[data-theme=sharks] .looks button.on{background:#06363a !important;color:var(--text)}
-html[data-theme=sharks] .stars{color:var(--acc2)}
-html[data-theme=sharks] .readybar{background:#05282b}
-html[data-theme=sharks] .looks button.on{border-color:var(--acc)}
-html[data-theme=sharks] h2::before{content:"// "}
-html[data-theme=sharks] pre{color:#7fd8d4}
-html[data-theme=sharks] .pt.now{border-color:var(--acc2);color:var(--acc2)}
-html[data-theme=sharks] .pt.timer{border-color:var(--acc);color:var(--acc)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .card,:is(html[data-theme=sharks],html[data-theme=snxff]) .job,:is(html[data-theme=sharks],html[data-theme=snxff]) .clip,:is(html[data-theme=sharks],html[data-theme=snxff]) .bulkbox,:is(html[data-theme=sharks],html[data-theme=snxff]) .projroot,:is(html[data-theme=sharks],html[data-theme=snxff]) .group,:is(html[data-theme=sharks],html[data-theme=snxff]) .hist{border-style:dashed !important;border-color:var(--line) !important}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .bulkbox{background:var(--bulkbg) !important}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .go,:is(html[data-theme=sharks],html[data-theme=snxff]) #bulkgo{background:var(--acc) !important;color:var(--onacc) !important;
+  text-transform:uppercase;letter-spacing:1px;box-shadow:0 0 0 1px var(--acc),0 0 14px var(--glow)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .go::before{content:"> "}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .capbtn,:is(html[data-theme=sharks],html[data-theme=snxff]) .rvkeep{background:var(--acc2) !important;color:var(--onacc) !important}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .tab::before{content:"[ "}:is(html[data-theme=sharks],html[data-theme=snxff]) .tab::after{content:" ]"}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .tab.on{background:var(--acc);color:var(--onacc)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .bar i{background:repeating-linear-gradient(90deg,var(--acc) 0 8px,#0000 8px 10px)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .seg button.on,:is(html[data-theme=sharks],html[data-theme=snxff]) .looks button.on{background:var(--segon) !important;color:var(--text)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .looks button.on{border-color:var(--acc)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .stars{color:var(--gold,var(--acc2))}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .readybar{background:var(--readybg)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) h2::before{content:"// ";color:var(--hot)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) pre{color:var(--pre)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .pt.now{border-color:var(--hot);color:var(--hot)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .pt.timer{border-color:var(--acc);color:var(--acc)}
+:is(html[data-theme=sharks],html[data-theme=snxff]) .gname>span:first-child{color:var(--acc3)}
+html[data-theme=snxff] h1{color:var(--dim)}
+html[data-theme=snxff] .gbtn{color:var(--hot) !important;border-color:var(--hot) !important}
+html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
 </style></head><body>
 <h1>👽 <span>Clipper</span>
   <select id="themepick" class="themepick" title="Theme" style="margin-left:auto">
-    <option value="">Woke as fuck</option><option value="sharks">San Jose Sharks</option></select>
+    <option value="">Woke as fuck</option><option value="sharks">San Jose Sharks</option><option value="snxff">SNXFFBXXTS</option></select>
   <button type="button" class="small" id="updbtn" title="Get the latest clipper from GitHub">⟳ Update</button>
   <button type="button" class="small" id="aibtn">⚙️ AI</button></h1>
 <div id="readybar" class="readybar" style="display:none"><span id="readytxt"></span>
