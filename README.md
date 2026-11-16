@@ -106,6 +106,11 @@ The **🎬 Montage** button on a batch joins the best part of its top 3 clips (d
 one video, with each part's captions (plus the campaign's on-screen text, only if its brief asks for it). It's clearly an original edit – TikTok marks plain re-posts of campaign footage as "unoriginal" and
 won't show them on For You. Command line: `--montage CLIP1.mp4 CLIP2.mp4 [CLIP3.mp4]`.
 
+**➕ Montage of the funniest short bits** (tick box in Bulk folder scrape): while scraping, clipper also
+collects short, complete moments (3.5–9 s, funniest first – laughs, funny lines), takes 3–5 from different
+moments (max 2 per video, up to ~40 s) and joins them with soft cross-fades, saved as
+`00-montage-funniest-bits.mp4` in the batch. Command line: `--bulk --bulk-montage`.
+
 ## Face tracking and trimming
 
 **Zoom** style follows the speaker's face instead of always cutting out the middle of a wide video: it

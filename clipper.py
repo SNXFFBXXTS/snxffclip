@@ -1751,26 +1751,7 @@ def montage_mode(args):
             tags += [t for t in m.get("tags", []) if t not in tags and not t.startswith("😴")]
         if len(made) < 2:
             die("those clips are all the same moment - pick clips of different moments")
-        ins, chain = [], ""
-        for k, f in enumerate(made):
-            ins += ["-i", str(f)]
-            chain += f"[{k}:v][{k}:a]"
-            total += duration_of(f) or 0
-        graph = f"{chain}concat=n={len(made)}:v=1:a=1[cv][ca]"
-        subs = build_ass([], 0, tmp, dict(CAPTION_PRESETS["highlight"]), overlay=hook, duration=total)
-        if subs:
-            fd = f":fontsdir='{ff_filter_path(FONTS_DIR)}'" if FONTS_DIR.is_dir() else ""
-            graph += f";[cv]subtitles='{ff_filter_path(subs)}'{fd}[v]"
-        else:
-            graph += ";[cv]null[v]"
-        part = out.with_name(out.name + ".part")
-        try:
-            ff(["ffmpeg", "-loglevel", "error", "-y", *ins, "-filter_complex", graph, "-map", "[v]", "-map", "[ca]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4", str(part)])
-            os.replace(part, out)
-        finally:
-            part.unlink(missing_ok=True)
+        total = join_parts(made, out, hook, tmp)
     side = {"montage": True, "parts": [str(c) for c, sd in parts if any(u[0] == sd["source"] for u in used)],
             "on_screen": hook,
             "meta": {"score": round(best_score + 0.5, 3), "len": round(total, 1), "tags": tags[:4],
@@ -2951,6 +2932,20 @@ def find_moments(src, args, lo, hi, target):
             extend_for_laugh(c, segs, laugh)
     if getattr(args, "chat", True):
         add_chat_bonus(src, cands, len(loud))
+    if getattr(args, "short_pool", None) is not None:
+        try:                                       # short, self-contained bits for a montage
+            sc = build_candidates(segs, 3.5, 9.0, 6.0, qa=getattr(args, "qa", True))
+            if len(sc) >= 3:
+                sc = score_candidates(sc, segs, loud, laugh, words=getattr(args, "smart_words", True))
+                for c in sc:
+                    t = c.get("tags", [])
+                    c["mscore"] = c["score"] + 2.0 * ("😂 laughter" in t) + 1.5 * ("🤣 funny line" in t) \
+                        - 1.0 * ("😴 lots of filler" in t)
+                    c["src"] = str(src)
+                sc.sort(key=lambda c: c["mscore"], reverse=True)
+                args.short_pool += sc[:12]
+        except Exception as e:                     # noqa - the montage is a bonus
+            print(f"  (montage bits skipped: {e})")
     camp = getattr(args, "campaign_data", None)
     kws = [k.lower() for k in (camp or {}).get("keywords", []) if k]
     if kws:
@@ -3091,6 +3086,8 @@ def bulk_mode(args):
         uniq.append(v)
     vids = uniq
     print(f"> bulk scrape: {len(vids)} videos")
+    if getattr(args, "bulk_montage", False):
+        args.short_pool = []
     pool, words_of, speech, visual = [], {}, 0.0, 0.0
     for i, v in enumerate(vids, 1):
         print(f"\n=== scan {i}/{len(vids)}: {v.name} ===")
@@ -3166,7 +3163,95 @@ def bulk_mode(args):
     for cd in picks:
         make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]],
                   clip_meta(cd), broll=cd.get("broll"))
+    if getattr(args, "bulk_montage", False):
+        try:
+            bulk_montage(args, out, words_of, picks)
+        except SystemExit:
+            print("  (not enough short moments for a montage this time)")
     print(f"\ndone - {len(picks)} clips in {out}")
+
+
+def bulk_montage(args, out, words_of, picks):
+    """Montage of the funniest short bits across the folder: 3-5 parts of 3.5-9 s, each a
+    complete line, from different moments (max 2 per video), joined with soft cross-fades."""
+    pool = sorted(getattr(args, "short_pool", []) or [], key=lambda c: c["mscore"], reverse=True)
+    parts, per, total = [], {}, 0.0
+    for c in pool:
+        d = c["end"] - c["start"]
+        if per.get(c["src"], 0) >= 2 or total + d > 40:
+            continue
+        if any(p["src"] == c["src"] and c["start"] < p["end"] + 1 and c["end"] > p["start"] - 1 for p in parts):
+            continue
+        parts.append(c)
+        per[c["src"]] = per.get(c["src"], 0) + 1
+        total += d
+        if len(parts) == 5:
+            break
+    if len(parts) < 3:
+        die("not enough short moments")
+    print(f"\n=== montage: {len(parts)} short bits ({total:.0f}s) ===")
+    keep_screen = args.on_screen
+    args.on_screen, keep_music = None, getattr(args, "music", None)
+    args.music = None                              # one soundtrack would restart every part
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            files = []
+            for k, c in enumerate(parts, 1):
+                f = tmp / f"part{k}.mp4"
+                print(f"  bit {k}: {Path(c['src']).stem[:25]} {short_ts(c['start'])}-{short_ts(c['end'])}  "
+                      f"{' '.join(c.get('tags', [])[:2])}")
+                make_clip(c["src"], c["start"], c["end"], f, args, words_of.get(c["src"], []), meta={})
+                files.append(f)
+            dest = out / "00-montage-funniest-bits.mp4"
+            join_parts(files, dest, keep_screen, tmp)
+    finally:
+        args.on_screen, args.music = keep_screen, keep_music
+    tags = ["🎬 montage"] + [t for t in ("😂 laughter", "🤣 funny line")
+                             if any(t in c.get("tags", []) for c in parts)]
+    dest.with_suffix(".clip.json").write_text(json.dumps({
+        "montage": True, "parts": [f"{c['src']}@{c['start']:.1f}-{c['end']:.1f}" for c in parts],
+        "on_screen": keep_screen,
+        "meta": {"score": round(max(c["score"] for c in parts) + 0.5, 3), "len": round(total, 1),
+                 "tags": tags, "visual": False, "kw": 0, "mix": False}}))
+    if picks:
+        cap = out / f"{picks[0]['name']}.txt"
+        if cap.is_file():
+            dest.with_suffix(".txt").write_text(cap.read_text())
+    print(f"  saved {dest}")
+
+
+def join_parts(files, out: Path, overlay, tmp: Path, fade=0.35):
+    """Join finished clips with soft cross-fades (picture and sound), plus the campaign's
+    on-screen text across the whole thing if it has one."""
+    durs = [duration_of(f) or 0 for f in files]
+    ins = []
+    for f in files:
+        ins += ["-i", str(f)]
+    fade = min(fade, min(durs) / 4) if durs else fade
+    v, a, off = "[0:v]", "[0:a]", 0.0
+    graph = []
+    for k in range(1, len(files)):
+        off += durs[k - 1] - fade
+        graph.append(f"{v}[{k}:v]xfade=transition=fade:duration={fade:.2f}:offset={off:.2f}[v{k}]")
+        graph.append(f"{a}[{k}:a]acrossfade=d={fade:.2f}[a{k}]")
+        v, a = f"[v{k}]", f"[a{k}]"
+    total = sum(durs) - fade * (len(files) - 1)
+    subs = build_ass([], 0, tmp, dict(CAPTION_PRESETS["highlight"]), overlay=overlay, duration=total) \
+        if overlay else None
+    if subs:
+        fd = f":fontsdir='{ff_filter_path(FONTS_DIR)}'" if FONTS_DIR.is_dir() else ""
+        graph.append(f"{v}subtitles='{ff_filter_path(subs)}'{fd}[vo]")
+        v = "[vo]"
+    part = out.with_name(out.name + ".part")
+    try:
+        ff(["ffmpeg", "-loglevel", "error", "-y", *ins, "-filter_complex", ";".join(graph),
+            "-map", v, "-map", a, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-r", "30", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4", str(part)])
+        os.replace(part, out)
+    finally:
+        part.unlink(missing_ok=True)
+    return total
 
 
 def batch_mode(args):
@@ -3635,6 +3720,8 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
           <span id="mvdltxt"></span></label>
         <label style="font-size:12px;color:var(--dim)">Best clips overall: <b id="bulkkv">Auto</b></label>
         <input type="range" id="bulkk" min="0" max="30" value="0">
+        <label class="toggle" style="margin-top:8px" title="Also join the funniest short moments (3-9 s each, complete lines, different moments) into one video with soft cross-fades">
+          <input type="checkbox" id="bulkmont"> ➕ Montage of the funniest short bits</label>
         <button type="button" class="go" id="bulkgo" style="margin-top:10px;padding:12px;
           background:linear-gradient(90deg,#3d7bff,#7a3dff)">🔎 Scrape the whole folder</button>
         <div style="margin-top:8px"><button type="button" class="small" id="batchgo" style="display:none"></button></div>
@@ -4083,9 +4170,11 @@ async function loadSources(){
 function fmtDur(s){s=Math.round(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
   return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}:${String(x).padStart(2,'0')}`}
 $('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'Auto';
+try{$('#bulkmont').checked=localStorage.getItem('clipper_bulkmont')==='1'}catch(e){}
+$('#bulkmont').onchange=()=>{try{localStorage.setItem('clipper_bulkmont',$('#bulkmont').checked?'1':'0')}catch(e){}};
 $('#bulkgo').onclick=async()=>{
   const b=$('#bulkgo'); b.disabled=true;
-  const r=await api('/api/jobs',{bulk:true,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
+  const r=await api('/api/jobs',{bulk:true,bulk_montage:$('#bulkmont').checked,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
     captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,smart:smartOpts(),campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
@@ -4897,6 +4986,8 @@ def serve_ui(args):
             if p.get("bulk"):
                 cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--bulk", "-k", str(p["k"]),
                        "--len", p["len"], "-m", p["mode"], "--model", p["model"]]
+                if p.get("bulk_montage"):
+                    cmd.append("--bulk-montage")
                 job["k"] = 1
             elif p.get("batch"):
                 cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--batch",
@@ -5444,7 +5535,7 @@ def serve_ui(args):
                     "url": url,
                     "k": (max(0, min(30, int(d.get("k") or 0))) if bulk else 0) if batch
                          else max(1, min(20, int(d.get("k") or 5))),
-                    "batch": batch, "bulk": bulk,
+                    "batch": batch, "bulk": bulk, "bulk_montage": bool(d.get("bulk_montage")),
                     "len": d.get("len") if d.get("len") in ("15-30", "20-60", "45-90") else "20-60",
                     "mode": d.get("mode") if d.get("mode") in ("blur", "crop", "none") else "blur",
                     "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium", "tiny.en",
@@ -5929,6 +6020,8 @@ def main():
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
+    p.add_argument("--bulk-montage", action="store_true",
+                   help="with --bulk: also make a montage of the funniest short bits")
     p.add_argument("--montage", nargs="+", metavar="CLIP.mp4",
                    help="join the best part of 2-4 clips into one video")
     p.add_argument("--no-laughs", dest="laughs", action="store_false", help="don't listen for laughter")
