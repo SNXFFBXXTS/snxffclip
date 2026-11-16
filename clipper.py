@@ -380,6 +380,110 @@ HYPE = re.compile(
     r"f+u+c+k\w*|shit\w*|damn)\b|[\[(](laugh\w*|applause|cheer\w*)|[$£]\d", re.I)
 
 
+FUNNY = re.compile(
+    r"\b(ha(ha)+|haha\w*|lol|lmao|joke|joking|funny|hilarious|i'?m dead|dead ass|bruh|nah+|"
+    r"what\?!|are you serious|you'?re (lying|joking)|stop it|oh no|shut up|plot twist|turns out|"
+    r"out of nowhere|i swear|no cap|deadass|embarrass\w*|awkward)\b|[\[(](laugh\w*|chuckl\w*)", re.I)
+OPINION = re.compile(
+    r"\b(overrated|underrated|trash|goat|the best|the worst|hate|love|honestly|the truth is|"
+    r"unpopular opinion|hot take|nobody (talks|tells)|i don'?t care|disagree|wrong|stupid|"
+    r"ridiculous|terrible|amazing|insane|legend\w*|never again|biggest mistake)\b", re.I)
+FILLER = re.compile(r"\b(um+|uh+|erm+|you know|i mean|sort of|kind of|basically|"
+                    r"like,|in terms of|at the end of the day|going forward|to be fair)\b", re.I)
+
+
+def audio_envelope(path: Path, step=0.02):
+    """Loudness every 20 ms (linear), cached - the raw material for laugh detection."""
+    import numpy as np
+    st = path.stat()
+    key = hashlib.md5(f"{path.resolve()}|{st.st_size}|{st.st_mtime}|{step}".encode()).hexdigest()
+    cf = CACHE / "env" / f"{key}.npy"
+    if cf.is_file():
+        try:
+            return np.load(cf)
+        except (OSError, ValueError):
+            pass
+    sr = 8000
+    n = int(sr * step)
+    p = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vn",
+                          "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"], stdout=subprocess.PIPE)
+    vals, buf = [], b""
+    while True:
+        chunk = p.stdout.read(n * 2 * 4000)
+        if not chunk:
+            break
+        buf += chunk
+        k = len(buf) // (n * 2)
+        if k:
+            a = np.frombuffer(buf[:k * n * 2], dtype=np.int16).astype(np.float32).reshape(k, n)
+            vals.append(np.sqrt((a ** 2).mean(axis=1)))
+            buf = buf[k * n * 2:]
+    p.wait()
+    env = np.concatenate(vals) if vals else np.zeros(1, dtype=np.float32)
+    try:
+        cf.parent.mkdir(parents=True, exist_ok=True)
+        np.save(cf, env.astype(np.float32))
+    except OSError:
+        pass
+    return env
+
+
+def reaction_curve(path: Path, segs):
+    """0..1 every HOP seconds: how much it sounds like laughter or a crowd reacting -
+    loud sound that ISN'T words, bursting on and off (ha-ha-ha) rather than steady music.
+    Plus laughs that the transcript wrote down (haha, [laughter])."""
+    import numpy as np
+    if not has_audio(path):
+        return np.zeros(max(1, int(duration_of(path) / HOP) + 1))
+    step = 0.02
+    env = audio_envelope(path, step)
+    nf = len(env)
+    covered = np.zeros(nf, dtype=bool)                  # frames where someone is saying words
+    for s_ in segs:
+        for w in s_.get("words") or []:
+            if FUNNY.search(str(w[2])):
+                continue                                # 'haha' counts as laughing, not talking
+            a, b = int((w[0] - 0.05) / step), int((w[1] + 0.05) / step) + 1
+            covered[max(0, a):min(nf, b)] = True
+    db = 20 * np.log10(env + 1.0)
+    speech_level = float(np.median(db[covered])) if covered.any() else float(np.median(db))
+    nh = int(nf * step / HOP) + 1
+    out = np.zeros(nh)
+    win = int(1.0 / step)                               # look at 1 s around each half-second
+    freqs = np.fft.rfftfreq(win, step)
+    band = (freqs >= 3) & (freqs <= 8)                  # 'ha-ha-ha' rate
+    allb = (freqs >= 1) & (freqs <= 20)
+    for h in range(nh):
+        c0 = int(h * HOP / step) + int(HOP / step / 2) - win // 2
+        a, b = max(0, c0), min(nf, c0 + win)
+        if b - a < win // 2:
+            continue
+        if covered[a:b].mean() > 0.4:
+            continue                                    # mostly words - not a reaction
+        level = float(np.percentile(db[a:b], 80)) - speech_level   # the bursts, not the gaps between
+        if level < -8:
+            continue                                    # too quiet to be a laugh
+        x = env[a:b] / (env[a:b].mean() + 1e-6)
+        depth = float(x.std())
+        if len(x) < win:
+            x = np.pad(x, (0, win - len(x)), constant_values=1.0)
+        spec = np.abs(np.fft.rfft(x - 1.0)) ** 2
+        ratio = float(spec[band].sum() / (spec[allb].sum() + 1e-9))
+        out[h] = min(1.0, max(0.0, (level + 8) / 12) * min(1.0, depth / 0.6) * min(1.0, ratio / 0.5))
+    sm = out.copy()                                     # a real laugh lasts: drop one-off blips
+    for h in range(nh):
+        nb = max(out[h - 1] if h > 0 else 0, out[h + 1] if h + 1 < nh else 0)
+        sm[h] = min(out[h], nb)
+    out = sm
+    for s_ in segs:                                     # laughs the transcript caught
+        for w in s_.get("words") or []:
+            if FUNNY.search(str(w[2])) and re.search(r"ha|lol|lmao|laugh|chuckl", str(w[2]), re.I):
+                h = int(w[0] / HOP)
+                if 0 <= h < nh:
+                    out[h] = max(out[h], 0.8)
+    return out
+
+
 def loudness_curve(path: Path):
     """Loudness (z-scored dB) every HOP seconds, via ffmpeg -> numpy."""
     import numpy as np
@@ -516,9 +620,11 @@ def clean_bounds(segs, i, j, pre=0.45, post=1.1):
     return max(0.0, start), end
 
 
-def score_candidates(cands, segs, loud):
+def score_candidates(cands, segs, loud, laugh=None):
     import numpy as np
     feats = []
+    if laugh is None:
+        laugh = np.zeros(len(loud))
     for c in cands:
         a, b = int(c["start"] / HOP), max(int(c["end"] / HOP), int(c["start"] / HOP) + 1)
         w = loud[a:b] if a < len(loud) else np.zeros(1)
@@ -538,13 +644,63 @@ def score_candidates(cands, segs, loud):
                                                                      # starts a new sentence
             1.0 if re.match(r"(and|but|or|because|which|that|then)\b", first, re.I) else 0.0,
                                                                      # starts mid-thought
-        ])
+        ] + content_feats(c, segs, laugh, dur, nwords))
     F = np.array(feats)
     Z = (F - F.mean(axis=0)) / (F.std(axis=0) + 1e-6)
-    weights = np.array([1.0, 0.8, 1.2, 0.9, 0.5, 0.6, 1.0, -0.8])
-    for c, z in zip(cands, Z @ weights):
+    #                 loud spike hook hype rate end new mid | laugh funny opinion filler ramble q&a
+    weights = np.array([1.0, 0.8, 1.2, 0.9, 0.5, 0.6, 1.0, -0.8, 1.5, 0.9, 0.6, -0.7, -0.5, 0.4])
+    for c, z, f in zip(cands, Z @ weights, F):
         c["score"] = float(z)
+        tags = []
+        if f[8] >= 0.45:
+            tags.append("😂 laughter")
+        if f[9] > 0:
+            tags.append("🤣 funny line")
+        if f[10] > 0:
+            tags.append("🔥 strong opinion")
+        if f[2] > 0 and f[11] <= 0.12:
+            tags.append("🪝 hook opening")
+        if f[11] > 0.12:
+            tags.append("😴 lots of filler")
+        c["tags"] = tags
     return sorted(cands, key=lambda c: c["score"], reverse=True)
+
+
+def content_feats(c, segs, laugh, dur, nwords):
+    """What makes a clip worth watching beyond loudness: laughs, jokes, opinions -
+    and what makes it boring: filler words and long rambling sentences."""
+    text = c["text"]
+    a = int((first_word_start(segs[c["i"]]) + 0.75) / HOP)   # a laugh BEFORE the clip's first line isn't its laugh
+    b = int((c["end"] + 1.5) / HOP) + 1                 # a laugh just AFTER the line counts too
+    lw = laugh[a:b] if a < len(laugh) else []
+    lmax = float(max(lw)) if len(lw) else 0.0
+    sents = [x for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+    avg_sent = nwords / max(1, len(sents))
+    qa = 0.0
+    for k in range(c["i"], c["j"]):                     # a question answered inside the clip
+        if is_question(segs[k]["text"]) and not is_question(segs[k + 1]["text"]):
+            qa = 1.0
+            break
+    return [lmax,
+            min(3, len(FUNNY.findall(text))) / max(dur, 1) * 30,
+            min(3, len(OPINION.findall(text))) / max(dur, 1) * 30,
+            len(FILLER.findall(text)) / max(1, nwords) * 5,
+            max(0.0, avg_sent - 22) / 10,               # long winding sentences
+            qa]
+
+
+def extend_for_laugh(c, segs, laugh):
+    """If people laugh right after the clip's last line, keep the laugh in."""
+    a = int(c["end"] / HOP)
+    tail = [h for h in range(a, min(len(laugh), a + 6)) if laugh[h] >= 0.45]
+    if not tail:
+        return
+    new_end = (tail[-1] + 1) * HOP + 0.2
+    j = c["j"]
+    if j + 1 < len(segs):
+        new_end = min(new_end, first_word_start(segs[j + 1]) - 0.06)
+    if new_end > c["end"]:
+        c["end"] = round(min(new_end, c["end"] + 3.0), 2)
 
 
 def pick(cands, k, gap=5.0, fill=True):
@@ -1982,7 +2138,7 @@ def clip_checks(f: Path, c=None):
 def clip_meta(c):
     return {"score": round(float(c.get("score", 0)), 3), "visual": bool(c.get("visual")),
             "kw": int(c.get("keyword_hits", 0)), "len": round(c["end"] - c["start"], 1),
-            "mix": bool(c.get("mix"))}
+            "mix": bool(c.get("mix")), "tags": c.get("tags", [])}
 
 
 def rate_clip(f: Path, c=None, checks=None, learn=None, rank=None):
@@ -2027,6 +2183,10 @@ def rate_clip(f: Path, c=None, checks=None, learn=None, rank=None):
     if c.get("keywords") and meta.get("kw"):
         stars += 0.2
         why.append("mentions " + c["keywords"][0])
+    tags = meta.get("tags") or []
+    good = [t for t in tags if not t.startswith("😴")]
+    stars += min(0.5, 0.25 * len(good)) - (0.3 if len(good) < len(tags) else 0)
+    why += tags[:2]
     probs = [w for w in (checks or []) if not w.startswith("No sound")]
     for w in probs:
         stars -= 0.3 if w.startswith("Low-res") else 0.6
@@ -2323,7 +2483,18 @@ def find_moments(src, args, lo, hi, target):
     cands = build_candidates(segs, lo, hi, target)
     if not cands:
         die(f"no {args.len}s windows found - try a different --len")
-    cands = score_candidates(cands, segs, loud)
+    try:
+        laugh = reaction_curve(src, segs)
+        n_laughs = int(((laugh[1:] >= 0.45) & (laugh[:-1] < 0.45)).sum()) if len(laugh) > 1 else 0
+        if n_laughs:
+            print(f"  heard {n_laughs} laugh / reaction moment(s)")
+    except Exception as e:                         # noqa - never let this stop clipping
+        print(f"  (laugh detection skipped: {e})")
+        laugh = None
+    cands = score_candidates(cands, segs, loud, laugh)
+    if laugh is not None:
+        for c in cands:
+            extend_for_laugh(c, segs, laugh)
     camp = getattr(args, "campaign_data", None)
     kws = [k.lower() for k in (camp or {}).get("keywords", []) if k]
     if kws:

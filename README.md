@@ -62,6 +62,16 @@ adds a **Clipper** shortcut to the desktop – double-click it and the page open
 while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
 again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
 
+## How clips are picked
+
+Every possible clip gets a score from: a hook in the first line, loud/excited moments, punchy words,
+**laughter and crowd reactions** (loud sound that isn't speech, bursting on and off like "ha-ha-ha" –
+steady music doesn't count), **funny lines** ("I swear", "plot twist", "are you serious"…), **strong
+opinions** ("overrated", "the worst", "hot take"…), a question answered inside the clip, and your
+campaign keywords. Clips lose points for **filler** ("um", "you know", "basically") and long rambling
+sentences. If people laugh right after the last line, the clip keeps the laugh. The reasons show under
+each clip (😂 laughter, 🤣 funny line, 🔥 strong opinion, 🪝 hook opening, 😴 lots of filler).
+
 ## Face tracking and trimming
 
 **Zoom** style follows the speaker's face instead of always cutting out the middle of a wide video: it
