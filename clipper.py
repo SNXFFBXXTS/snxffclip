@@ -176,7 +176,25 @@ def download_full(url):
         print(f"> downloading: {title}")
         run(["yt-dlp", "--no-warnings", "--no-playlist", "-f", YTDLP_FMT,
              "--merge-output-format", "mp4", "-o", str(path), url])
+    fetch_chat(url, vid)
     return path, title
+
+
+def fetch_chat(url, vid):
+    """Streams/VODs: grab the chat replay (YouTube live chat, Twitch rechat) once, if there is one.
+    Chat going wild is the best highlight signal there is."""
+    if any((CACHE / f"{vid}.{k}.json").is_file() for k in ("live_chat", "rechat", "chat")) \
+            or (CACHE / f"{vid}.nochat").is_file():
+        return
+    print("  looking for a chat replay...", flush=True)
+    try:
+        subprocess.run(["yt-dlp", "-q", "--no-warnings", "--no-playlist", "--skip-download", "--write-subs",
+                        "--sub-langs", "live_chat,rechat", "-o", str(CACHE / f"{vid}.%(ext)s"), url],
+                       capture_output=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if not any((CACHE / f"{vid}.{k}.json").is_file() for k in ("live_chat", "rechat")):
+        (CACHE / f"{vid}.nochat").write_text("")
 
 
 CAP_RES = "scale='if(gt(iw,ih),-2,min(iw,1440))':'if(gt(iw,ih),min(ih,1440),-2)'"
@@ -484,6 +502,164 @@ def reaction_curve(path: Path, segs):
     return out
 
 
+CHAT_HYPE = re.compile(r"(lol|lmao|lmfao|rofl|lul|kekw|omegalul|icant|💀|😂|🤣|😭|^w+$|\bw+\b|"
+                       r"clip (it|that)|no way|wtf|pog\w*|holy|bro+|insane|hahah?)", re.I)
+CHAT_OFFSET_KEYS = ("videoOffsetTimeMsec", "content_offset_seconds", "contentOffsetSeconds", "offset_seconds")
+
+
+def chat_files(src: Path):
+    src = Path(src)
+    names = [src.with_name(f"{src.stem}.{k}.json") for k in ("live_chat", "rechat", "chat")]
+    return [f for f in names if f.is_file()]
+
+
+def load_chat(src: Path):
+    """[(seconds into the video, message text)] from a YouTube live-chat or Twitch rechat replay file."""
+    msgs = []
+
+    def text_of(o):
+        out = []
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in ("text", "body") and isinstance(v, str):
+                    out.append(v)
+                elif k == "shortcuts" and isinstance(v, list) and v:
+                    out.append(str(v[0]))
+                elif isinstance(v, (dict, list)):
+                    out += text_of(v)
+        elif isinstance(o, list):
+            for v in o:
+                out += text_of(v)
+        return out
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k in CHAT_OFFSET_KEYS:
+                if k in o:
+                    try:
+                        t = float(o[k]) / (1000 if k == "videoOffsetTimeMsec" else 1)
+                    except (TypeError, ValueError):
+                        break
+                    msgs.append((t, " ".join(text_of(o))))
+                    return
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for f in chat_files(src):
+        txt = f.read_text(errors="ignore")
+        try:
+            walk(json.loads(txt))
+        except ValueError:                         # YouTube: one JSON object per line
+            for line in txt.splitlines():
+                if line.strip().startswith("{"):
+                    try:
+                        walk(json.loads(line))
+                    except ValueError:
+                        pass
+    return sorted(m for m in msgs if m[0] >= 0)
+
+
+def chat_curve(src: Path, n):
+    """0..1 every HOP seconds: how much chat exploded about this moment (shifted back ~4 s,
+    because chat reacts after the moment happens). None if there's no chat replay."""
+    import numpy as np
+    msgs = load_chat(src)
+    if len(msgs) < 30:
+        return None
+    cnt = np.zeros(n)
+    for t, m in msgs:
+        h = int(max(0.0, t - 4.0) / HOP)
+        if h < n:
+            cnt[h] += 2.0 if CHAT_HYPE.search(m) else 1.0
+    k = int(4 / HOP)                               # smooth over ~4 s
+    sm = np.convolve(cnt, np.ones(k) / k, mode="same")
+    base = np.array([np.median(sm[max(0, i - 120):i + 120]) for i in range(0, n, 20)])
+    base = np.repeat(base, 20)[:n]
+    z = (sm - base) / (np.sqrt(base + 0.25) + 0.5)
+    z = np.clip(z, 0, None)
+    top = np.percentile(z[z > 0], 98) if (z > 0).any() else 0
+    print(f"  chat replay: {len(msgs)} messages")
+    return np.clip(z / top, 0, 1) if top > 0 else np.zeros(n)
+
+
+FILLER_WORD = re.compile(r"^(u+m+|u+h+|e+r+m*|h+m+|a+h+)[.,!?…]*$", re.I)
+
+
+def plan_pause_cuts(words_rel, dur, env=None, step=0.02):
+    """Which parts of a clip to keep: drop silent pauses (> 0.6 s) and 'um/uh'.
+    Pauses that are loud (laughter, a reaction) are kept. Returns [(a, b)] or None."""
+    import numpy as np
+    w = sorted([x for x in words_rel if x[1] > x[0]], key=lambda x: x[0])
+    if len(w) < 3:
+        return None
+    speech_db = None
+    if env is not None and len(env):
+        db = 20 * np.log10(env + 1.0)
+        idx = [int(x[0] / step) for x in w if int(x[0] / step) < len(db)]
+        speech_db = float(np.median(db[idx])) if idx else None
+    cut = []
+    for a, b in zip(w, w[1:]):
+        gap0, gap1 = a[1], b[0]
+        if gap1 - gap0 > 0.6:
+            loud = False
+            if speech_db is not None:
+                seg = db[int(gap0 / step):int(gap1 / step) + 1]
+                loud = len(seg) and float(np.percentile(seg, 80)) > speech_db - 10
+            if not loud:
+                cut.append((gap0 + 0.2, gap1 - 0.15))
+    for x in w:
+        if FILLER_WORD.match(str(x[2]).strip()):
+            cut.append((x[0] - 0.03, x[1] + 0.03))
+    cut = sorted((max(0.0, a), min(dur, b)) for a, b in cut if b - a > 0.12)
+    if sum(b - a for a, b in cut) < 0.4:
+        return None
+    keep, pos = [], 0.0
+    for a, b in cut:
+        if a > pos:
+            keep.append((pos, a))
+        pos = max(pos, b)
+    if pos < dur:
+        keep.append((pos, dur))
+    return [(round(a, 3), round(b, 3)) for a, b in keep if b - a > 0.05]
+
+
+def remap_time(t, keep):
+    """Clip time before cutting -> after cutting (None if that moment was cut out)."""
+    done = 0.0
+    for a, b in keep:
+        if t < a:
+            return None
+        if t <= b:
+            return done + (t - a)
+        done += b - a
+    return None
+
+
+def audio_envelope_tmp(path: Path, step=0.02):
+    """Like audio_envelope but not cached (for temporary clip files)."""
+    import numpy as np
+    sr = 8000
+    n = int(sr * step)
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(sr),
+                        "-f", "s16le", "-"], capture_output=True)
+    a = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32)
+    k = len(a) // n
+    return np.sqrt((a[:k * n].reshape(k, n) ** 2).mean(axis=1)) if k else None
+
+
+def apply_cuts(raw: Path, keep, tmp: Path) -> Path:
+    out = tmp / "cut.mp4"
+    expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+    ff(["ffmpeg", "-loglevel", "error", "-y", "-i", str(raw),
+        "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
+        "-af", f"aselect='{expr}',asetpts=N/SR/TB",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", str(out)])
+    return out
+
+
 def loudness_curve(path: Path):
     """Loudness (z-scored dB) every HOP seconds, via ffmpeg -> numpy."""
     import numpy as np
@@ -687,6 +863,30 @@ def content_feats(c, segs, laugh, dur, nwords):
             len(FILLER.findall(text)) / max(1, nwords) * 5,
             max(0.0, avg_sent - 22) / 10,               # long winding sentences
             qa]
+
+
+def add_chat_bonus(src, cands, n=None):
+    """Stream replays: boost moments where chat went wild."""
+    try:
+        if not chat_files(Path(src)):
+            return
+        n = n or int(duration_of(Path(src)) / HOP) + 1
+        chat = chat_curve(Path(src), n)
+    except Exception as e:                         # noqa - never let chat stop clipping
+        print(f"  (chat skipped: {e})")
+        return
+    if chat is None:
+        return
+    hot = 0
+    for c in cands:
+        a, b = int(c["start"] / HOP), int(c["end"] / HOP) + 1
+        peak = float(chat[a:b].max()) if a < len(chat) and b > a else 0.0
+        c["score"] += 3.0 * peak
+        if peak >= 0.5:
+            c.setdefault("tags", []).insert(0, "💬 chat went wild")
+            hot += 1
+    cands.sort(key=lambda c: c["score"], reverse=True)
+    print(f"  {hot} possible clips where chat went wild")
 
 
 def extend_for_laugh(c, segs, laugh):
@@ -1355,11 +1555,31 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
         elif args.captions:
             segs = transcribe(raw, args.model, cache=False)
             win = [(w[0] + start, w[1] + start, w[2]) for s in segs for w in s["words"]]
+        keep = None
+        if getattr(args, "cut_pauses", True) and win and not broll:
+            try:
+                rel = [(w[0] - start, w[1] - start, w[2]) for w in win]
+                keep = plan_pause_cuts(rel, end - start, audio_envelope_tmp(raw))
+            except Exception as e:                  # noqa - a clip without cuts is still a clip
+                print(f"  (pause cutting skipped: {e})")
+                keep = None
+            if keep:
+                kept = sum(b - a for a, b in keep)
+                print(f"  cut {end - start - kept:.1f}s of pauses / ums")
+                raw = apply_cuts(raw, keep, tmp)
+        cap_words, cap_dur = win, end - start
+        if keep:                                    # captions follow the cut-down timing
+            cap_words = []
+            for w in win:
+                a, b = remap_time(w[0] - start, keep), remap_time(w[1] - start, keep)
+                if a is not None and not FILLER_WORD.match(str(w[2]).strip()):
+                    cap_words.append((start + a, start + (b if b is not None else a + 0.2), w[2]))
+            cap_dur = sum(b - a for a, b in keep)
         need_video = getattr(args, "style", None) == "auto" or getattr(args, "match_colors", False)
         style = getattr(args, "fixed_style", None) or resolve_style(args, raw if need_video else None,
                                                                      win, end - start)
-        subs = build_ass(win if args.captions else [], start, tmp, style,
-                         overlay=getattr(args, "on_screen", None), duration=end - start)
+        subs = build_ass(cap_words if args.captions else [], start, tmp, style,
+                         overlay=getattr(args, "on_screen", None), duration=cap_dur)
         music = pick_music(getattr(args, "music", None))
         if music:
             print(f"  music: {music.name}")
@@ -1379,7 +1599,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
             "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
             "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None),
             "logo": getattr(args, "logo", None), "logo_pos": getattr(args, "logo_pos", "auto"),
-            "track": getattr(args, "track", True)}
+            "track": getattr(args, "track", True), "cut_pauses": bool(keep),
+            "cut_pauses_opt": getattr(args, "cut_pauses", True)}
     old = out.with_suffix(".clip.json")
     if meta is None and old.is_file():              # restyle: keep the original pick info
         try:
@@ -1443,6 +1664,87 @@ def plan_broll(clip, words, broll_pool, n_start=0):
     return inserts
 
 
+def variations_mode(args):
+    """Three new versions of one clip: a tight short cut, a longer one with more context,
+    and the same moment in the other look with a hook line on screen."""
+    clip = Path(args.variations).expanduser()
+    sf = clip.with_suffix(".clip.json")
+    if not sf.is_file():
+        die("no saved settings for that clip - make it again first")
+    sd = json.loads(sf.read_text())
+    src, start, end = sd["source"], sd["start"], sd["end"]
+    if not is_url(src) and not Path(src).is_file():
+        die(f"the original video isn't there any more: {src}")
+    args.captions = sd.get("captions", True)
+    args.music, args.music_vol = sd.get("music"), sd.get("music_vol", 0.15)
+    args.music_start = sd.get("music_start", 0.0)
+    args.logo, args.logo_pos = sd.get("logo"), sd.get("logo_pos", "auto")
+    args.track = sd.get("track", True)
+    if sd.get("style"):
+        args.fixed_style = sd["style"]
+    words = [tuple(w) for w in sd.get("words", [])]
+    all_words = words
+    if not is_url(src) and sd.get("captions", True):
+        try:                                        # whole transcript (cached) for the longer cut
+            all_words = [tuple(w) for s_ in transcribe(Path(src), args.model) for w in s_.get("words", [])]
+        except (Exception, SystemExit):
+            pass
+    ends = [w[1] for w in words if re.search(r"[.!?]$", str(w[2]).strip())]
+    starts = [w[0] for k, w in enumerate(words) if k == 0 or re.search(r"[.!?]$", str(words[k - 1][2]).strip())]
+    made = 0
+    meta = (sd.get("meta") or {}) | {"variant": True}
+    base_mode, base_screen = sd.get("mode", "blur"), sd.get("on_screen")
+
+    def one(tag, s0, e0, mode, on_screen):
+        nonlocal made
+        if e0 - s0 < 4:
+            return
+        args.mode, args.on_screen = mode, on_screen
+        out = clip.with_name(f"{clip.stem}-{tag}.mp4")
+        make_clip(src, round(s0, 2), round(e0, 2), out, args, all_words, meta=meta, broll=None)
+        made += 1
+
+    # 1. short: end on the clip's last line (the payoff), start as late as still gives 8-20 s
+    last = max(ends) + 0.5 if ends else end
+    s_short = next((s for s in sorted(starts, reverse=True) if last - s >= 8), start)
+    if last - s_short > 20:
+        s_short = next((s for s in sorted(starts) if last - s <= 20), s_short)
+    if (end - start) - (last - s_short) > 3:
+        one("short", s_short - 0.3, min(end, last + 0.4), base_mode, base_screen)
+    # 2. long: one more sentence of setup before, and of reaction after (max +15 s)
+    before = [w for w in all_words if start - 15 <= w[0] < start - 0.2]
+    s_long = start
+    for k in range(len(before) - 1, -1, -1):
+        if k == 0 or re.search(r"[.!?]$", str(before[k - 1][2]).strip()):
+            s_long = before[k][0] - 0.4
+            break
+    after = [w for w in all_words if end + 0.2 <= w[0] <= end + 15]
+    e_long = end
+    for w in after:
+        if re.search(r"[.!?]$", str(w[2]).strip()):
+            e_long = w[1] + 0.6
+            break
+    if (s_long < start - 1) or (e_long > end + 1):
+        one("long", s_long, e_long, base_mode, base_screen)
+    # 3. other look + the most gripping line on screen as a hook
+    other = "crop" if base_mode == "blur" else "blur"
+    hook = base_screen
+    if not hook and words:
+        sents, cur = [], []
+        for w in words:
+            cur.append(str(w[2]).strip())
+            if re.search(r"[.!?]$", cur[-1]):
+                sents.append(" ".join(cur))
+                cur = []
+        sents = [x for x in sents if 3 <= len(x.split()) <= 12] or sents
+        if sents:
+            hook = max(sents, key=lambda x: len(HYPE.findall(x)) * 2 + len(FUNNY.findall(x)) * 2 +
+                       len(OPINION.findall(x)) + (1 if "?" in x else 0) - len(x.split()) / 20)
+            hook = " ".join(hook.split()[:12])
+    one("look2", start, end, other, hook)
+    print(f"made {made} variation(s)")
+
+
 def restyle_mode(args):
     """Re-render one clip with a new caption style (uses the saved .clip.json)."""
     clip = Path(args.restyle).expanduser()
@@ -1453,6 +1755,8 @@ def restyle_mode(args):
     args.mode = sd.get("mode", args.mode)
     if getattr(args, "track", True):                 # keep how the clip was made unless told --no-track
         args.track = sd.get("track", True)
+    if getattr(args, "cut_pauses", True):            # keep the clip's own setting unless told --keep-pauses
+        args.cut_pauses = sd.get("cut_pauses_opt", True)
     args.captions = sd.get("captions", True) if (args.trim_start is not None or args.trim_end is not None) else True
     args.music = sd.get("music")
     args.music_vol = sd.get("music_vol", 0.15)
@@ -2472,6 +2776,7 @@ def find_moments(src, args, lo, hi, target):
         if not cands:
             die("video too short to use")
         print(f"  no real speech - picking by movement and sound ({len(cands)} options)")
+        add_chat_bonus(src, cands)
         learn = load_learning()
         if learn:
             for c in cands:
@@ -2495,6 +2800,7 @@ def find_moments(src, args, lo, hi, target):
     if laugh is not None:
         for c in cands:
             extend_for_laugh(c, segs, laugh)
+    add_chat_bonus(src, cands, len(loud))
     camp = getattr(args, "campaign_data", None)
     kws = [k.lower() for k in (camp or {}).get("keywords", []) if k]
     if kws:
@@ -3189,7 +3495,9 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
         <button type="button" data-v="crop" title="Zoom to fill the screen - follows the speaker's face (needs face tracking: see the Speed box in ⚙️ AI)">Zoom</button>
         <button type="button" data-v="none">Original</button></div>
       <label class="toggle" id="trackbox" style="display:none;margin-top:6px" title="Turn off when there's more than one person in shot - Zoom then keeps the middle">
-        <input type="checkbox" id="track" checked> 🙂 Follow face</label></div>
+        <input type="checkbox" id="track" checked> 🙂 Follow face</label>
+      <label class="toggle" style="margin-top:6px" title="Cut silent pauses and um/uh out of each clip - tighter clips keep viewers watching. Laughs and reactions are kept.">
+        <input type="checkbox" id="cutp" checked> ✂️ Cut pauses</label></div>
     <div class="field"><label>Transcription</label>
       <div class="seg" data-name="model">
         <button type="button" data-v="base.en">Fast</button>
@@ -3404,6 +3712,8 @@ function trackShow(){const z=document.querySelector('.seg[data-name=mode] button
 document.querySelectorAll('.seg[data-name=mode] button').forEach(b=>b.addEventListener('click',()=>setTimeout(trackShow,0)));
 try{const t=localStorage.getItem('clipper_track'); if(t!==null)$('#track').checked=t==='1'}catch(e){}
 $('#track').onchange=()=>{try{localStorage.setItem('clipper_track',$('#track').checked?'1':'0')}catch(e){}};
+try{const t=localStorage.getItem('clipper_cutp'); if(t!==null)$('#cutp').checked=t==='1'}catch(e){}
+$('#cutp').onchange=()=>{try{localStorage.setItem('clipper_cutp',$('#cutp').checked?'1':'0')}catch(e){}};
 document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
   seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -3572,7 +3882,7 @@ $('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'
 $('#bulkgo').onclick=async()=>{
   const b=$('#bulkgo'); b.disabled=true;
   const r=await api('/api/jobs',{bulk:true,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -3582,7 +3892,7 @@ $('#bulkgo').onclick=async()=>{
 $('#batchgo').onclick=async()=>{
   const b=$('#batchgo'); b.disabled=true;
   const r=await api('/api/jobs',{batch:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -3729,7 +4039,7 @@ $('#f').onsubmit=async e=>{
   e.preventDefault();
   $('#go').disabled=true;
   const r=await api('/api/jobs',{url:$('#url').value.trim(),k:+$('#k').value,len:opt.len,mode:opt.mode,
-    model:opt.model,captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+    model:opt.model,captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   $('#go').disabled=false;
   if(r.error){alert(r.error);return}
   $('#url').value='';
@@ -3804,6 +4114,7 @@ async function loadClips(){
         ${capButtons(c)}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download title="Download to this device (phone: it lands in Downloads / your gallery)">📲 Save</a>
           ${CAN_SHARE?`<button title="Send straight to TikTok, Instagram, your gallery…" onclick="shareClip(this,'${esc(c.path).replace(/'/g,"\\'")}')">↗</button>`:''}
+          ${c.styled?`<button title="Make 3 different versions: shorter, longer, other look + hook" onclick="variations('${esc(c.path).replace(/'/g,"\\'")}')">🎲</button>`:''}
           ${c.styled?`<button title="Move the start / end" onclick="trimDlg('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">✂️</button>`:''}
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
@@ -4063,6 +4374,9 @@ async function shareClip(btn,path){
     if(e.name==='NotAllowedError')btn.textContent='↗ tap again';   // download took a while: next tap shares at once
     else btn.textContent='↗';
   }
+}
+async function variations(path){
+  const r=await api('/api/variations',{path}); if(r.error){alert(r.error);return} poll();
 }
 /* ---------- trim: move a clip's start/end and re-make it ---------- */
 let tr=null;
@@ -4340,6 +4654,8 @@ def serve_ui(args):
                        "--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
                 if p.get("trim"):
                     cmd += ["--trim-start", f"{p['trim'][0]:.2f}", "--trim-end", f"{p['trim'][1]:.2f}"]
+                if p.get("variations"):
+                    cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--variations", p["restyle"]]
                 if p["match"]:
                     cmd.append("--match-colors")
                 run_job(job, cmd)
@@ -4362,6 +4678,8 @@ def serve_ui(args):
                 cmd.append("--no-captions")
             if not p.get("track", True):
                 cmd.append("--no-track")
+            if not p.get("cut_pauses", True):
+                cmd.append("--keep-pauses")
             if p["ollama"]:
                 cmd += ["--ollama", p["ollama"]]
             if p["music"]:
@@ -4893,6 +5211,7 @@ def serve_ui(args):
                                                               "base.en", "small.en", "medium.en") else "small.en",
                     "captions": bool(d.get("captions", True)),
                     "track": bool(d.get("track", True)),
+                    "cut_pauses": bool(d.get("cut_pauses", True)),
                     "music": music, "music_vol": music_vol, "campaign": camp,
                     "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "auto",
                     "match": bool(d.get("match")),
@@ -5188,6 +5507,22 @@ def serve_ui(args):
                     order.append(jid)
                 q.put(job)
                 self.send_json({"id": jid})
+            elif u.path == "/api/variations":
+                rel = str(d.get("path", ""))
+                f = safe(rel)
+                if not f or not f.with_suffix(".clip.json").is_file():
+                    return self.send_json({"error": "Can't make variations of that clip"}, 400)
+                params = {"restyle": str(f), "url": f.name, "style": "highlight", "match": False, "words": 3,
+                          "cap": {}, "variations": True}
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": f"🎲 Variations: {f.stem}", "error": "", "made": 0, "k": 3,
+                       "clip": rel, "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
             elif u.path == "/api/clipinfo":
                 f = safe(str(d.get("path", "")))
                 sf = f.with_suffix(".clip.json") if f else None
@@ -5335,6 +5670,9 @@ def main():
     p.add_argument("--style", choices=["auto"] + list(CAPTION_PRESETS), default="auto",
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
+    p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
+    p.add_argument("--keep-pauses", dest="cut_pauses", action="store_false",
+                   help="don't cut silent pauses and um/uh out of clips")
     p.add_argument("--trim-start", type=float, help="with --restyle: new start (seconds in the source video)")
     p.add_argument("--trim-end", type=float, help="with --restyle: new end (seconds in the source video)")
     p.add_argument("--match-colors", action="store_true",
@@ -5406,6 +5744,8 @@ def main():
 
     if args.restyle:
         return restyle_mode(args)
+    if args.variations:
+        return variations_mode(args)
     if args.ui:
         args.out_dir = args.out_dir or OUT_DIR
         args.out_dir.mkdir(parents=True, exist_ok=True)

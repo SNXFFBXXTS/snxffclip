@@ -72,6 +72,18 @@ campaign keywords. Clips lose points for **filler** ("um", "you know", "basicall
 sentences. If people laugh right after the last line, the clip keeps the laugh. The reasons show under
 each clip (😂 laughter, 🤣 funny line, 🔥 strong opinion, 🪝 hook opening, 😴 lots of filler).
 
+## Tighter clips, stream chat and variations
+
+- **✂️ Cut pauses** (on by default, under Style): silent pauses longer than ~0.6 s and "um/uh" are cut
+  out of each clip, and the captions follow the new timing. Laughs and reactions in a pause are kept.
+  `--keep-pauses` turns it off.
+- **💬 Stream chat:** when you paste a YouTube or Twitch stream/VOD link, clipper also grabs the chat
+  replay and boosts the moments where chat exploded ("LMAO", "KEKW", 💀, "W"…). For a downloaded video,
+  put its chat file next to it as `<video name>.live_chat.json` or `.rechat.json`.
+- **🎲 Variations** on any clip: makes up to three new versions of the same moment – a tight *short* cut
+  that ends on the payoff, a *long* one with more setup and reaction, and *look2* in the other style with
+  its most gripping line on screen as a hook. Great when a campaign only has a little footage.
+
 ## Face tracking and trimming
 
 **Zoom** style follows the speaker's face instead of always cutting out the middle of a wide video: it
