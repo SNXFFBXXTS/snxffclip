@@ -2013,12 +2013,17 @@ def best_settings(c, cdir=None):
         why.append("pauses kept (brief bans jump cuts)")
     elif re.search(r"fast[- ]pac|no (dead|slow)|keep it (snappy|tight)|cut slow", text):
         why.append("pauses cut (brief wants fast pacing)")
-    if re.search(r"\b(trailer|cinematic|gameplay only|no commentary)\b", text):
+    trailer = re.search(r"\b(trailer|cinematic|gameplay only|no commentary)\b", text)
+    if trailer:
         out["smart"]["words"] = False
         why.append("judged on action, not words (trailer/gameplay)")
         if out["smart"]["cut_pauses"]:          # a trailer's pacing is deliberate - cutting the quiet
             out["smart"]["cut_pauses"] = False  # bits makes it jumpy, and it's edited official footage
             why.append("pauses kept (trailer pacing)")
+        # a scored trailer has no real laughter and no stream chat - music swells and explosions
+        # otherwise get read as laughs and drag the picks to the wrong moments
+        out["smart"]["laughs"] = out["smart"]["laugh_tail"] = out["smart"]["chat"] = False
+        why.append("laugh & chat scoring off (scored footage)")
     if re.search(r"\b(stream|vod|twitch|kick|livestream|live)\b", text):
         why.append("stream chat highlights on")
     if re.search(r"\b(funny|comedy|laugh|meme|reaction)\b", text):
