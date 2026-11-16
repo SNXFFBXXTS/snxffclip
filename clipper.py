@@ -2480,14 +2480,18 @@ WantedBy=default.target
     else:
         print("! couldn't set up the background service - start clipper by hand as before")
     if shutil.which("tailscale"):
-        r = subprocess.run(["tailscale", "serve", "--bg", str(port)], capture_output=True, text=True, timeout=60)
-        txt = (r.stdout + r.stderr).strip()
-        if r.returncode == 0:
-            print("✓ secure link ready:\n" + txt)
-        else:
-            print("! Tailscale secure link not set up yet:\n  " + txt.replace("\n", "\n  ") +
-                  "\n  If it says 'access denied', run once:  sudo tailscale set --operator=$USER"
-                  "\n  If it gives a link to enable HTTPS, open it, switch HTTPS on, then run this again.")
+        print("\nSetting up the secure link with Tailscale...\n"
+              "  If a link appears below, open it in your browser and switch it on - this waits for you.\n"
+              "  (Ctrl+C to skip.)\n", flush=True)
+        try:                                   # show Tailscale's own messages - it may wait for approval
+            r = subprocess.run(["tailscale", "serve", "--bg", str(port)])
+            if r.returncode == 0:
+                print("✓ secure link ready - press 📱 on the page to see it")
+            else:
+                print("! not set up. If it said 'access denied', run once:  sudo tailscale set --operator=$USER"
+                      "\n  then run  ./clipper.py --phone-setup  again.")
+        except KeyboardInterrupt:
+            print("\nskipped - the normal http link still works")
     else:
         print("! Tailscale isn't installed - install it to reach clipper away from home")
     print("Logs:  journalctl --user -u clipper -f")
