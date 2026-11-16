@@ -2970,15 +2970,44 @@ def visual_moments(src, lo, hi, target):
     return sorted(cands, key=lambda c: c["score"], reverse=True)
 
 
+def clear_speech(src, model):
+    """Transcribe and drop the shaky 'speech' - sung lyrics, music, noise - so it can't
+    turn into nonsense captions. -> (segs, how many were dropped)"""
+    raw = [s for s in transcribe(src, model) if s["text"]]
+    segs = [s for s in raw if s.get("conf", 0) > -1.0 and s.get("nospeech", 0) < 0.6]
+    return segs, len(raw) - len(segs)
+
+
+def any_language(src, args, segs):
+    """The .en models are deaf to anything but English, and plenty of campaign footage
+    isn't (Japanese and Arabic game trailers, foreign-language music). Re-listen with the
+    same model's any-language version and keep whichever heard more. -> segs"""
+    model = str(getattr(args, "model", "small"))
+    if not model.endswith(".en"):
+        return segs
+    other = model[:-3]
+    print(f"  little English heard - listening again in any language ('{other}')")
+    try:
+        alt, _ = clear_speech(src, other)
+    except Exception as e:                         # noqa - never let this stop clipping
+        print(f"  (any-language pass skipped: {e})")
+        return segs
+    if sum(len(s["text"].split()) for s in alt) > sum(len(s["text"].split()) for s in segs):
+        args.model = other                         # remember it for the rest of this video
+        return alt
+    return segs
+
+
 def find_moments(src, args, lo, hi, target):
     """Transcribe (cached), then score every possible clip in one video.
     Videos with (almost) no speech fall back to picking by movement and sound."""
-    raw_segs = [s for s in transcribe(src, args.model) if s["text"]]
-    # drop shaky "speech" - sung lyrics, music, noise - so it can't turn into nonsense captions
-    segs = [s for s in raw_segs if s.get("conf", 0) > -1.0 and s.get("nospeech", 0) < 0.6]
-    if len(segs) < len(raw_segs):
-        print(f"  ignored {len(raw_segs) - len(segs)} unclear bit(s) of 'speech' (music/lyrics)")
+    segs, dropped = clear_speech(src, args.model)
+    if dropped:
+        print(f"  ignored {dropped} unclear bit(s) of 'speech' (music/lyrics)")
     words = sum(len(s["text"].split()) for s in segs)
+    if words < 12:
+        segs = any_language(src, args, segs)
+        words = sum(len(s["text"].split()) for s in segs)
     if words < 12:
         cands = visual_moments(src, lo, hi, target)
         if not cands:
@@ -2996,8 +3025,17 @@ def find_moments(src, args, lo, hi, target):
     if getattr(args, "qa", True):
         segs = split_sentences(segs)               # answers and questions become separate pieces
     cands = build_candidates(segs, lo, hi, target, qa=getattr(args, "qa", True))
-    if not cands:
-        die(f"no {args.len}s windows found - try a different --len")
+    if not cands:                                  # scattered half-heard lines with music between
+        alt = any_language(src, args, segs)        # them give no window long enough to use
+        if alt is not segs:
+            segs = split_sentences(alt) if getattr(args, "qa", True) else alt
+            cands = build_candidates(segs, lo, hi, target, qa=getattr(args, "qa", True))
+    if not cands:                                  # nothing to hear: pick on what's on screen
+        cands = visual_moments(src, lo, hi, target)
+        if not cands:
+            die(f"no {args.len}s windows found - try a different clip length")
+        print(f"  not enough speech to cut on - picking by movement and sound ({len(cands)} options)")
+        return segs, cands
     try:
         if not getattr(args, "laughs", True):
             raise RuntimeError("turned off")
