@@ -1131,9 +1131,9 @@ def face_track_x(raw: Path):
 
 
 def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0,
-           logo=None, logo_pos="auto"):
+           logo=None, logo_pos="auto", track=True):
     if mode == "crop":      # zoom to fill, cut the sides off - following the face if we can see one
-        fx = face_track_x(raw)
+        fx = face_track_x(raw) if track else None
         if fx:
             v = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
                  f"crop={W}:{H}:x='{fx}':y='(ih-{H})/2'[v0]")
@@ -1213,7 +1213,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
         try:
             render(raw, part, args.mode, subs, music,
                    getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0),
-                   getattr(args, "logo", None), getattr(args, "logo_pos", "auto"))
+                   getattr(args, "logo", None), getattr(args, "logo_pos", "auto"),
+                   getattr(args, "track", True))
             os.replace(part, out)
         finally:
             part.unlink(missing_ok=True)
@@ -1221,7 +1222,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
             "mode": args.mode, "captions": bool(args.captions),
             "music": str(music) if music else None, "music_vol": getattr(args, "music_vol", 0.15),
             "music_start": getattr(args, "music_start", 0.0), "on_screen": getattr(args, "on_screen", None),
-            "logo": getattr(args, "logo", None), "logo_pos": getattr(args, "logo_pos", "auto")}
+            "logo": getattr(args, "logo", None), "logo_pos": getattr(args, "logo_pos", "auto"),
+            "track": getattr(args, "track", True)}
     old = out.with_suffix(".clip.json")
     if meta is None and old.is_file():              # restyle: keep the original pick info
         try:
@@ -1293,6 +1295,8 @@ def restyle_mode(args):
         die(f"no saved settings for {clip.name} - it was made before Restyle existed, make it again")
     sd = json.loads(side_f.read_text())
     args.mode = sd.get("mode", args.mode)
+    if getattr(args, "track", True):                 # keep how the clip was made unless told --no-track
+        args.track = sd.get("track", True)
     args.captions = sd.get("captions", True) if (args.trim_start is not None or args.trim_end is not None) else True
     args.music = sd.get("music")
     args.music_vol = sd.get("music_vol", 0.15)
@@ -3012,7 +3016,9 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
       <div class="seg" data-name="mode">
         <button type="button" data-v="blur" class="on">Blur bg</button>
         <button type="button" data-v="crop" title="Zoom to fill the screen - follows the speaker's face (needs face tracking: see the Speed box in ⚙️ AI)">Zoom</button>
-        <button type="button" data-v="none">Original</button></div></div>
+        <button type="button" data-v="none">Original</button></div>
+      <label class="toggle" id="trackbox" style="display:none;margin-top:6px" title="Turn off when there's more than one person in shot - Zoom then keeps the middle">
+        <input type="checkbox" id="track" checked> 🙂 Follow face</label></div>
     <div class="field"><label>Transcription</label>
       <div class="seg" data-name="model">
         <button type="button" data-v="base.en">Fast</button>
@@ -3222,6 +3228,11 @@ async function api(p,body){
   return r.json();
 }
 const opt={len:'20-60',mode:'blur',model:'small.en'};
+function trackShow(){const z=document.querySelector('.seg[data-name=mode] button.on');
+  $('#trackbox').style.display=(z&&z.dataset.v==='crop')?'':'none'}
+document.querySelectorAll('.seg[data-name=mode] button').forEach(b=>b.addEventListener('click',()=>setTimeout(trackShow,0)));
+try{const t=localStorage.getItem('clipper_track'); if(t!==null)$('#track').checked=t==='1'}catch(e){}
+$('#track').onchange=()=>{try{localStorage.setItem('clipper_track',$('#track').checked?'1':'0')}catch(e){}};
 document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
   seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -3390,7 +3401,7 @@ $('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'
 $('#bulkgo').onclick=async()=>{
   const b=$('#bulkgo'); b.disabled=true;
   const r=await api('/api/jobs',{bulk:true,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -3400,7 +3411,7 @@ $('#bulkgo').onclick=async()=>{
 $('#batchgo').onclick=async()=>{
   const b=$('#batchgo'); b.disabled=true;
   const r=await api('/api/jobs',{batch:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -3547,7 +3558,7 @@ $('#f').onsubmit=async e=>{
   e.preventDefault();
   $('#go').disabled=true;
   const r=await api('/api/jobs',{url:$('#url').value.trim(),k:+$('#k').value,len:opt.len,mode:opt.mode,
-    model:opt.model,captions:$('#caps').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+    model:opt.model,captions:$('#caps').checked,track:$('#track').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   $('#go').disabled=false;
   if(r.error){alert(r.error);return}
   $('#url').value='';
@@ -4178,6 +4189,8 @@ def serve_ui(args):
                 cmd += ["-o", str(out_root)]
             if not p["captions"]:
                 cmd.append("--no-captions")
+            if not p.get("track", True):
+                cmd.append("--no-track")
             if p["ollama"]:
                 cmd += ["--ollama", p["ollama"]]
             if p["music"]:
@@ -4708,6 +4721,7 @@ def serve_ui(args):
                     "model": d.get("model") if d.get("model") in ("tiny", "base", "small", "medium", "tiny.en",
                                                               "base.en", "small.en", "medium.en") else "small.en",
                     "captions": bool(d.get("captions", True)),
+                    "track": bool(d.get("track", True)),
                     "music": music, "music_vol": music_vol, "campaign": camp,
                     "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "auto",
                     "match": bool(d.get("match")),
@@ -5139,6 +5153,8 @@ def main():
     p.add_argument("-e", "--end", help="end time, e.g. 2:05")
     p.add_argument("-n", "--name", default="clip", help="output file name")
     p.add_argument("-l", "--list", help="text file of 'start end name' lines")
+    p.add_argument("--no-track", dest="track", action="store_false",
+                   help="Zoom style: don't follow faces, just keep the middle (e.g. more than one person in shot)")
     p.add_argument("-m", "--mode", choices=["blur", "crop", "none"], default="blur",
                    help="vertical style (default: blur)")
     p.add_argument("-c", "--captions", action="store_true", help="burn in captions (auto: on by default)")
