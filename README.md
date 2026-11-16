@@ -72,6 +72,14 @@ campaign keywords. Clips lose points for **filler** ("um", "you know", "basicall
 sentences. If people laugh right after the last line, the clip keeps the laugh. The reasons show under
 each clip (😂 laughter, 🤣 funny line, 🔥 strong opinion, 🪝 hook opening, 😴 lots of filler).
 
+## 🎯 Best for brief
+
+Picking a campaign sets everything for you – clip length, style, music off when it's banned, captions,
+and the ✨ Smart picking switches – from the campaign's settings and brief (e.g. trailers are judged on
+action not words, "fast pacing" keeps pause-cutting on, podcasts in Zoom turn Follow face off). The green
+line under the campaign says what it chose and why. Changed things by hand? Press **🎯 Best for brief**
+to put them back.
+
 ## ✨ Smart picking switches
 
 Under the Style buttons, **✨ Smart picking** has a tick box for each feature (remembered per browser):

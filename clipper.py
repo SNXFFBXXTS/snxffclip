@@ -1888,6 +1888,46 @@ def file_into_campaign(src: str, c) -> str:
     return str(dest)
 
 
+def best_settings(c, cdir=None):
+    """The page settings that suit this campaign's brief best, with the reasons."""
+    brief = ""
+    if cdir and (Path(cdir) / "brief.txt").is_file():
+        try:
+            brief = (Path(cdir) / "brief.txt").read_text(errors="ignore").lower()
+        except OSError:
+            brief = ""
+    text = brief + " " + " ".join(str(c.get(k) or "") for k in ("caption_rules", "name")).lower()
+    why = []
+    out = {"captions": bool(c.get("captions", True)), "music": bool(c.get("music", True)),
+           "mode": c.get("mode") or "blur", "len": c.get("len") or "", "track": True, "cap_auto": True,
+           "smart": {"laughs": True, "laugh_tail": True, "chat": True, "words": True,
+                     "cut_pauses": True, "qa": True}}
+    if out["len"]:
+        why.append(f"{out['len'].replace('-', '–')} s clips")
+    why.append({"blur": "Blur bg (whole frame)", "crop": "Zoom", "none": "original framing"}.get(out["mode"], out["mode"]))
+    if not out["music"]:
+        why.append("no added music")
+    if not out["captions"]:
+        why.append("no captions")
+    if re.search(r"\b(podcast|two people|both (hosts|guests)|duo|panel)\b", text) and out["mode"] == "crop":
+        out["track"] = False
+        why.append("follow face off (often 2 people in shot)")
+    if re.search(r"\b(no|don'?t|do not|avoid) (jump ?cuts?|cutting|editing the (speech|audio))\b", text):
+        out["smart"]["cut_pauses"] = False
+        why.append("pauses kept (brief bans jump cuts)")
+    elif re.search(r"fast[- ]pac|no (dead|slow)|keep it (snappy|tight)|cut slow", text):
+        why.append("pauses cut (brief wants fast pacing)")
+    if re.search(r"\b(trailer|cinematic|gameplay only|no commentary)\b", text):
+        out["smart"]["words"] = False
+        why.append("judged on action, not words (trailer/gameplay)")
+    if re.search(r"\b(stream|vod|twitch|kick|livestream|live)\b", text):
+        why.append("stream chat highlights on")
+    if re.search(r"\b(funny|comedy|laugh|meme|reaction)\b", text):
+        why.append("laughs & funny lines boosted")
+    out["why"] = why
+    return out
+
+
 def apply_campaign(args, c):
     """Force the campaign's rules onto the settings."""
     print(f"> campaign: {c.get('name', c['id'])}  ({c.get('agency', 'Other')})")
@@ -3469,9 +3509,11 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
   <div style="margin-top:12px"><label style="font-size:12px;color:var(--dim)">Campaign</label>
     <div style="display:flex;gap:8px;margin-top:5px">
       <select id="camp" style="flex:1"><option value="">No campaign (free clipping)</option></select>
+      <button type="button" class="small" id="campbest" title="Set everything below to what suits this campaign's brief" style="display:none;white-space:nowrap">🎯 Best for brief</button>
       <button type="button" class="small" id="campedit" title="Edit this campaign" style="display:none">✏️</button>
       <button type="button" class="small" id="campnew" style="white-space:nowrap">+ New</button></div>
     <div id="campnote" class="s" style="color:var(--acc2);font-size:12px;margin-top:5px"></div>
+    <div id="campbestmsg" class="s" style="color:var(--ok);font-size:12px;margin-top:3px"></div>
     <div id="campchk" class="cchk"></div>
     <div id="srcbox" style="display:none;margin-top:10px"><label style="font-size:12px;color:var(--dim)">Footage</label>
       <select id="src" style="margin-top:5px"></select>
@@ -3868,9 +3910,30 @@ async function loadCamps(){
     Object.entries(byAg).map(([ag,cs])=>`<optgroup label="${esc(ag)}">`+
       cs.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')+'</optgroup>').join('');
 }
+function segSet(name,v){const seg=document.querySelector(`.seg[data-name=${name}]`); if(!seg)return false;
+  const b=seg.querySelector(`button[data-v="${v}"]`); if(b){b.click();return true}
+  seg.querySelectorAll('button').forEach(x=>x.classList.remove('on')); opt[name]=v; return false}
+function bestFit(c,quiet){
+  const b=c&&c.best; if(!b)return;
+  if(b.len){ if(!segSet('len',b.len)){        // brief's own length: light up the nearest preset
+      const [lo,hi]=b.len.split('-').map(Number), mid=(lo+hi)/2; let best=null,bd=1e9;
+      document.querySelectorAll('.seg[data-name=len] button').forEach(x=>{const [a,z]=x.dataset.v.split('-').map(Number);
+        const d=Math.abs((a+z)/2-mid); if(d<bd){bd=d;best=x}});
+      if(best)best.classList.add('on'); opt.len=b.len}}
+  segSet('mode',b.mode); setTimeout(trackShow,0);
+  $('#track').checked=b.track; $('#caps').checked=b.captions; $('#caps').dispatchEvent(new Event('change'));
+  document.querySelectorAll('.smart').forEach(x=>{if(x.dataset.k in b.smart)x.checked=b.smart[x.dataset.k]});
+  try{localStorage.setItem('clipper_smart',JSON.stringify(smartOpts()))}catch(e){}; smartSum();
+  if(b.cap_auto&&!cs.auto){cs.auto=true;try{csChrome();csSave()}catch(e){}}
+  if(!b.music){$('#music').value='';$('#volbox').style.display='none'}
+  $('#campbestmsg').textContent='🎯 Set up for this brief: '+b.why.join(' · ');
+}
+$('#campbest').onclick=()=>bestFit(camps[$('#camp').value]);
 $('#camp').onchange=e=>{
   const c=camps[e.target.value];
   $('#campedit').style.display=e.target.value?'':'none';
+  $('#campbest').style.display=e.target.value?'':'none'; $('#campbestmsg').textContent='';
+  if(c)bestFit(c,true);
   campCheck();
   const noMusic=c&&c.music===false;
   $('#music').disabled=noMusic; if(noMusic){$('#music').value='';$('#volbox').style.display='none'}
@@ -5173,7 +5236,8 @@ def serve_ui(args):
                     out.append({"id": cid, "name": name, "agency": agency,
                                 "music": c.get("music", True), "on_screen": c.get("on_screen"),
                                 "platforms": c.get("platforms") or [], "rate": c.get("rate"),
-                                "mention": c.get("mention") or "", "mentions": c.get("mentions") or {}})
+                                "mention": c.get("mention") or "", "mentions": c.get("mentions") or {},
+                                "best": best_settings(c, campaign_dir(cid))})
                 self.send_json(out)
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
