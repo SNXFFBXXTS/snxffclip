@@ -1701,7 +1701,7 @@ def payoff_window(words, start, end, lo=5.0, hi=11.0):
 
 
 def montage_mode(args):
-    """Join the best part of 2-4 clips into one video with a hook title on top -
+    """Join the best part of 2-4 clips into one video (with the campaign's on-screen text, if any) -
     clearly an original edit, which TikTok and co. reward (and plain re-posts don't get)."""
     import time
     clips = [Path(c).expanduser() for c in args.montage]
@@ -1728,10 +1728,7 @@ def montage_mode(args):
     args.cut_pauses = first.get("cut_pauses_opt", True)
     if first.get("style"):
         args.fixed_style = first["style"]
-    hook = first.get("on_screen")
-    if not hook:
-        allw = [tuple(w) for _, sd in parts for w in sd.get("words", [])]
-        hook = best_line(allw) or f"{len(parts)} best moments"
+    hook = first.get("on_screen")                   # only the brief's own on-screen text - nothing made up
     out = parts[0][0].parent / f"montage-{time.strftime('%d%b-%H%M')}.mp4"
     print(f"> montage of {len(parts)} clips -> {out.name}")
     with tempfile.TemporaryDirectory() as td:
@@ -1787,7 +1784,7 @@ def montage_mode(args):
 
 def variations_mode(args):
     """Three new versions of one clip: a tight short cut, a longer one with more context,
-    and the same moment in the other look with a hook line on screen."""
+    and the same moment in the other look (on-screen text only if the brief asks)."""
     clip = Path(args.variations).expanduser()
     sf = clip.with_suffix(".clip.json")
     if not sf.is_file():
@@ -1847,22 +1844,9 @@ def variations_mode(args):
             break
     if (s_long < start - 1) or (e_long > end + 1):
         one("long", s_long, e_long, base_mode, base_screen)
-    # 3. other look + the most gripping line on screen as a hook
+    # 3. the other look - on-screen text only if the campaign's brief asks for it
     other = "crop" if base_mode == "blur" else "blur"
-    hook = base_screen
-    if not hook and words:
-        sents, cur = [], []
-        for w in words:
-            cur.append(str(w[2]).strip())
-            if re.search(r"[.!?]$", cur[-1]):
-                sents.append(" ".join(cur))
-                cur = []
-        sents = [x for x in sents if 3 <= len(x.split()) <= 12] or sents
-        if sents:
-            hook = max(sents, key=lambda x: len(HYPE.findall(x)) * 2 + len(FUNNY.findall(x)) * 2 +
-                       len(OPINION.findall(x)) + (1 if "?" in x else 0) - len(x.split()) / 20)
-            hook = " ".join(hook.split()[:12])
-    one("look2", start, end, other, hook)
+    one("look2", start, end, other, base_screen)
     print(f"made {made} variation(s)")
 
 
@@ -4312,7 +4296,7 @@ async function loadClips(){
       <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
       <button class="gbtn" onclick="review(${gi})">🎬 Review</button>
       <button class="gbtn" onclick="planGroup(${gi})">🗓 Plan</button>
-      ${g.clips.filter(c=>c.styled).length>=2?`<button class="gbtn" onclick="montage(${gi})" title="Join the best part of the top 3 clips into one video with a hook title - an original edit TikTok won't flag as a re-post">🎬 Montage</button>`:''}</span></div>
+      ${g.clips.filter(c=>c.styled).length>=2?`<button class="gbtn" onclick="montage(${gi})" title="Join the best part of the top 3 clips into one video - an original edit TikTok won't flag as a re-post">🎬 Montage</button>`:''}</span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
@@ -4325,7 +4309,7 @@ async function loadClips(){
         ${capButtons(c)}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download title="Download to this device (phone: it lands in Downloads / your gallery)">📲 Save</a>
           ${CAN_SHARE?`<button title="Send straight to TikTok, Instagram, your gallery…" onclick="shareClip(this,'${esc(c.path).replace(/'/g,"\\'")}')">↗</button>`:''}
-          ${c.styled?`<button title="Make 3 different versions: shorter, longer, other look + hook" onclick="variations('${esc(c.path).replace(/'/g,"\\'")}')">🎲</button>`:''}
+          ${c.styled?`<button title="Make up to 3 different versions: shorter, longer, other look" onclick="variations('${esc(c.path).replace(/'/g,"\\'")}')">🎲</button>`:''}
           ${c.styled?`<button title="Move the start / end" onclick="trimDlg('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">✂️</button>`:''}
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
@@ -5914,7 +5898,7 @@ def main():
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
     p.add_argument("--montage", nargs="+", metavar="CLIP.mp4",
-                   help="join the best part of 2-4 clips into one video with a hook title")
+                   help="join the best part of 2-4 clips into one video")
     p.add_argument("--no-laughs", dest="laughs", action="store_false", help="don't listen for laughter")
     p.add_argument("--no-laugh-tail", dest="laugh_tail", action="store_false",
                    help="don't run clips on to include a laugh after the punchline")

@@ -97,14 +97,13 @@ Command-line equivalents: `--no-laughs --no-laugh-tail --no-chat --no-smart-word
   replay and boosts the moments where chat exploded ("LMAO", "KEKW", 💀, "W"…). For a downloaded video,
   put its chat file next to it as `<video name>.live_chat.json` or `.rechat.json`.
 - **🎲 Variations** on any clip: makes up to three new versions of the same moment – a tight *short* cut
-  that ends on the payoff, a *long* one with more setup and reaction, and *look2* in the other style with
-  its most gripping line on screen as a hook. Great when a campaign only has a little footage.
+  that ends on the payoff, a *long* one with more setup and reaction, and *look2* in the other style (on-screen
+  text only when the brief asks for it). Great when a campaign only has a little footage.
 
 ## 🎬 Montage
 
 The **🎬 Montage** button on a batch joins the best part of its top 3 clips (different moments only) into
-one video, with each part's captions and a hook line on top (the campaign's on-screen text if it has
-one). It's clearly an original edit – TikTok marks plain re-posts of campaign footage as "unoriginal" and
+one video, with each part's captions (plus the campaign's on-screen text, only if its brief asks for it). It's clearly an original edit – TikTok marks plain re-posts of campaign footage as "unoriginal" and
 won't show them on For You. Command line: `--montage CLIP1.mp4 CLIP2.mp4 [CLIP3.mp4]`.
 
 ## Face tracking and trimming
