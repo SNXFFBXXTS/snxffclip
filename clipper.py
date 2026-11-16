@@ -2016,6 +2016,9 @@ def best_settings(c, cdir=None):
     if re.search(r"\b(trailer|cinematic|gameplay only|no commentary)\b", text):
         out["smart"]["words"] = False
         why.append("judged on action, not words (trailer/gameplay)")
+        if out["smart"]["cut_pauses"]:          # a trailer's pacing is deliberate - cutting the quiet
+            out["smart"]["cut_pauses"] = False  # bits makes it jumpy, and it's edited official footage
+            why.append("pauses kept (trailer pacing)")
     if re.search(r"\b(stream|vod|twitch|kick|livestream|live)\b", text):
         why.append("stream chat highlights on")
     if re.search(r"\b(funny|comedy|laugh|meme|reaction)\b", text):
@@ -2100,8 +2103,9 @@ def make_caption(c, text, n, ollama=None):
 # ---------- where campaigns come from ----------
 # The sites that list paid clipping campaigns. Check them for work, then paste the brief into clipper.
 SITES = [
-    {"id": "whop", "name": "Whop - Content Rewards", "url": "https://whop.com/discover/content-rewards/",
-     "note": "The biggest one. Most campaigns, pays per 1,000 views."},
+    {"id": "whop", "name": "Content Rewards (on Whop)", "url": "https://contentrewards.com/c/discover",
+     "note": "The biggest one. Most campaigns, paid through Whop. Check the min payout, not just the CPM.",
+     "also": ["whop.com"]},
     {"id": "clipaffiliates", "name": "ClipAffiliates", "url": "https://www.clipaffiliates.com/clippers",
      "note": "No application needed. Views read straight from TikTok/YouTube/Instagram."},
     {"id": "vyro", "name": "Vyro", "url": "https://vyro.app/",
@@ -2136,8 +2140,9 @@ def guess_site(text: str) -> str:
     """Which site a pasted brief came from, if it says."""
     low = (text or "").lower()
     for s in SITES:
-        host = re.sub(r"^https?://(www\.)?|/.*$", "", s["url"])
-        if host in low or re.search(r"\b" + re.escape(s["name"].split(" - ")[0].lower()) + r"\b", low):
+        hosts = [re.sub(r"^https?://(www\.)?|/.*$", "", s["url"])] + list(s.get("also", []))
+        name = re.sub(r"\s*\(.*\)", "", s["name"].split(" - ")[0]).lower()
+        if any(h in low for h in hosts) or re.search(r"\b" + re.escape(name) + r"\b", low):
             return s["id"]
     return ""
 
@@ -2206,7 +2211,8 @@ def parse_brief(text):
 
     # which site it came from, and the campaign's own page (to submit your posts to)
     c["site"] = guess_site(raw)
-    hosts = "|".join(re.sub(r"^https?://(www\.)?|/.*$", "", s["url"]) for s in SITES)
+    hosts = "|".join(re.escape(h) for s in SITES
+                     for h in [re.sub(r"^https?://(www\.)?|/.*$", "", s["url"])] + list(s.get("also", [])))
     m = re.search(r"https?://(?:www\.)?(?:" + hosts + r")\S*", raw, re.I)
     c["campaign_url"] = m[0].rstrip(").,") if m else ""
 
