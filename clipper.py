@@ -3379,6 +3379,13 @@ pre{white-space:pre-wrap;font-size:11.5px;background:var(--field);padding:10px;b
     max-height:220px;overflow:auto;color:#b6bac6}
 .small{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;padding:5px 10px;font-size:12px}
 .group{margin-bottom:20px}
+.group.min{margin-bottom:8px;border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+.group.min .grid{display:none}
+.group.min .gname{margin-bottom:0}
+.gtog{cursor:pointer;user-select:none}
+.gtog .car{display:inline-block;width:14px;color:var(--dim);transition:transform .15s}
+.group:not(.min) .gtog .car{transform:rotate(90deg)}
+.gsum{font-size:12px;color:var(--dim);font-weight:400;margin-left:6px}
 .gname{font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 .clip{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
@@ -3863,7 +3870,10 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
  <button type="button" class="go" id="rvdone">Done</button>
 </dialog>
 
-<h2>Your clips</h2>
+<h2 style="display:flex;align-items:center;gap:10px">Your clips
+  <span style="margin-left:auto;display:flex;gap:6px">
+   <button type="button" class="small" onclick="minAll(true)" title="Fold every batch away">▸ Fold all</button>
+   <button type="button" class="small" onclick="minAll(false)" title="Open every batch">▾ Open all</button></span></h2>
 <div id="clips"><div class="empty">Loading…</div></div>
 
 <script>
@@ -4282,6 +4292,26 @@ function logToggle(id,o){o?openLogs.add(id):openLogs.delete(id)}
 async function cancelJob(id){await api('/api/cancel',{id});poll()}
 async function clearJob(id){await api('/api/clear',{id});poll()}
 
+/* ---------- fold away batches you're not working on ---------- */
+let minState={};
+try{minState=JSON.parse(localStorage.getItem('clipper_min')||'{}')}catch(e){}
+function saveMin(){try{localStorage.setItem('clipper_min',JSON.stringify(minState))}catch(e){}}
+function isMin(g,gi){
+  if(g.name in minState)return minState[g.name];
+  const newest=Math.max(...lastGroups.map(x=>Math.max(...x.clips.map(c=>c.mtime||0))));
+  const mine=Math.max(...g.clips.map(c=>c.mtime||0));
+  return newest-mine>3*3600;                   // new batches open, ones from hours ago folded
+}
+function gSummary(g){
+  const posted=g.clips.filter(c=>(c.posted||[]).length).length;
+  return `${g.clips.length} clip${g.clips.length==1?'':'s'}`+(posted?` · ${posted} posted`:'');
+}
+function toggleMin(el){const box=el.closest('.group');box.classList.toggle('min');
+  minState[box.dataset.g]=box.classList.contains('min');saveMin()}
+function focusGroup(btn){const me=btn.closest('.group');
+  document.querySelectorAll('#clips .group').forEach(x=>{const m=x!==me;x.classList.toggle('min',m);minState[x.dataset.g]=m});
+  saveMin(); me.scrollIntoView({behavior:'smooth',block:'start'})}
+function minAll(m){document.querySelectorAll('#clips .group').forEach(x=>{x.classList.toggle('min',m);minState[x.dataset.g]=m});saveMin()}
 async function loadClips(){
   const groups=await api('/api/clips');
   const el=$('#clips');
@@ -4291,10 +4321,12 @@ async function loadClips(){
   await campsReady; if(!plSet.plan_windows) plSet=await api('/api/settings');
   dueAt={}; groups.forEach(g=>{const pl=computePlan(g); if(pl.rows) pl.rows.forEach(r=>dueAt[r.c.path+'|'+r.p]=r.t)});
   el.innerHTML=groups.map((g,gi)=>`
-    <div class="group"><div class="gname"><span>${esc(g.name)}</span>
+    <div class="group${isMin(g,gi)?' min':''}" data-g="${esc(g.name)}"><div class="gname">
+      <span class="gtog" onclick="toggleMin(this)" title="Fold / open this batch"><span class="car">▸</span> ${esc(g.name)}
+        <span class="gsum">${gSummary(g)}</span></span>
       <span style="display:flex;gap:8px;align-items:center">${(()=>{const n=g.clips.filter(c=>(c.checks||[]).length).length;return n?`<span class="gwarn">⚠ ${n} need a look</span>`:''})()}
-      <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
       <button class="gbtn" onclick="review(${gi})">🎬 Review</button>
+      <button class="gbtn" onclick="focusGroup(this)" title="Fold away every other batch">🎯 Focus</button>
       <button class="gbtn" onclick="planGroup(${gi})">🗓 Plan</button>
       ${g.clips.filter(c=>c.styled).length>=2?`<button class="gbtn" onclick="montage(${gi})" title="Join the best part of the top 3 clips into one video - an original edit TikTok won't flag as a re-post">🎬 Montage</button>`:''}</span></div>
     <div class="grid">${g.clips.map(c=>`
