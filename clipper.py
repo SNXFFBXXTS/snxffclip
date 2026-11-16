@@ -1665,6 +1665,17 @@ def plan_broll(clip, words, broll_pool, n_start=0):
     return inserts
 
 
+def best_line_text(text):
+    """The most quotable sentence in a clip's transcript (4-14 words), or None."""
+    sents = [x.strip(" -") for x in re.split(r"(?<=[.!?])\s+", str(text or "")) if x.strip()]
+    good = [x for x in sents if 4 <= len(x.split()) <= 14] or \
+           [" ".join(x.split()[:12]) for x in sents if len(x.split()) >= 4]
+    if not good:
+        return None
+    return max(good, key=lambda x: len(HYPE.findall(x)) * 2 + len(FUNNY.findall(x)) * 2 +
+               len(OPINION.findall(x)) + (1 if "?" in x else 0) - len(FILLER.findall(x)) - len(x.split()) / 20)
+
+
 def best_line(words):
     """The most gripping short sentence in some words - for an on-screen hook."""
     sents, cur = [], []
@@ -2069,8 +2080,11 @@ def make_caption(c, text, n, ollama=None):
         caps = c["example_captions"]                 # approved list: copy word for word, nothing added
         return caps[n % len(caps)]
     line = ollama_caption(c, text, ollama) if (ollama or ai_name()) else None
-    examples = c.get("example_captions") or ["(write your caption here)"]
-    line = line or examples[n % len(examples)]
+    if not line:                                    # no AI: quote the clip's own best line - true to the
+        q = best_line_text(text)                    # clip, and different on every video (examples copied
+        line = f'"{q}"' if q else ""                # word for word make every clipper's post the same)
+    if not line:
+        line = "(write your caption here)"
     m = c.get("mention")
     if m and m.lower() not in line.lower():
         line = f"{line} {m}"
