@@ -2097,8 +2097,54 @@ def make_caption(c, text, n, ollama=None):
     return "\n".join(lines)
 
 
+# ---------- where campaigns come from ----------
+# The sites that list paid clipping campaigns. Check them for work, then paste the brief into clipper.
+SITES = [
+    {"id": "whop", "name": "Whop - Content Rewards", "url": "https://whop.com/discover/content-rewards/",
+     "note": "The biggest one. Most campaigns, pays per 1,000 views."},
+    {"id": "clipaffiliates", "name": "ClipAffiliates", "url": "https://www.clipaffiliates.com/clippers",
+     "note": "No application needed. Views read straight from TikTok/YouTube/Instagram."},
+    {"id": "vyro", "name": "Vyro", "url": "https://vyro.app/",
+     "note": "Bigger names and celebrity content."},
+    {"id": "elev8or", "name": "Elev8or", "url": "https://www.elev8or.io/",
+     "note": "Clipping bounties, low minimum before you can withdraw."},
+    {"id": "clippingnet", "name": "Clipping.net", "url": "https://clipping.net/",
+     "note": "Campaign based, works much like Content Rewards."},
+    {"id": "clipfarm", "name": "Clip Farm", "url": "https://clipfarm.io/",
+     "note": "Runs its campaigns on Whop, so you're paid through Whop."},
+    {"id": "findclout", "name": "FindClout", "url": "https://findclout.com/",
+     "note": "Steadier payout terms, smaller choice of campaigns."},
+    {"id": "zula", "name": "Zula.chat", "url": "https://zula.chat/",
+     "note": "TikTok and Instagram only - no YouTube Shorts."},
+]
+SITE_NAMES = {s["id"]: s["name"] for s in SITES}
+
+
+def sites_file() -> Path:
+    return CACHE / "sites.json"
+
+
+def sites_checked() -> dict:
+    """When you last looked at each site for new campaigns."""
+    try:
+        return json.loads(sites_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def guess_site(text: str) -> str:
+    """Which site a pasted brief came from, if it says."""
+    low = (text or "").lower()
+    for s in SITES:
+        host = re.sub(r"^https?://(www\.)?|/.*$", "", s["url"])
+        if host in low or re.search(r"\b" + re.escape(s["name"].split(" - ")[0].lower()) + r"\b", low):
+            return s["id"]
+    return ""
+
+
 # ---------- reading a pasted campaign brief ----------
-CAMPAIGN_FIELDS = ["name", "agency", "platforms", "source_note", "music", "min_len", "len", "mode",
+CAMPAIGN_FIELDS = ["name", "agency", "site", "campaign_url", "platforms", "source_note", "music",
+                   "min_len", "len", "mode",
                    "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
                    "exact_captions", "checklist", "rate", "manual_checks", "logo", "logo_pos", "mentions"]
@@ -2158,6 +2204,12 @@ def parse_brief(text):
          or re.search(r"([A-Z][\w ]{2,30}?) •", raw))
     c["agency"] = (m[1].strip().title() if m and m[1].isupper() else m[1].strip()) if m else "Other"
 
+    # which site it came from, and the campaign's own page (to submit your posts to)
+    c["site"] = guess_site(raw)
+    hosts = "|".join(re.sub(r"^https?://(www\.)?|/.*$", "", s["url"]) for s in SITES)
+    m = re.search(r"https?://(?:www\.)?(?:" + hosts + r")\S*", raw, re.I)
+    c["campaign_url"] = m[0].rstrip(").,") if m else ""
+
     # platforms
     plats = []
     if "tiktok" in low:
@@ -2180,9 +2232,11 @@ def parse_brief(text):
     c["music"] = not no_music
 
     # lengths
-    m = re.search(r"minimum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds)?", low)
+    m = (re.search(r"minimum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds)?", low)
+         or re.search(r"(?:min(?:imum)?|at least)[^\d\n]{0,12}(\d+)\s*(?:s\b|sec\b|seconds\b)", low))
     mn = int(m[1]) if m else 0
-    m = re.search(r"maximum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds|m|min)?", low)
+    m = (re.search(r"maximum (?:video |clip )?(?:length|duration)[^\d\n]{0,25}(\d+)\s*(s|sec|seconds|m|min)?", low)
+         or re.search(r"(?:max(?:imum)?|up to|no longer than)[^\d\n]{0,12}(\d+)\s*(s\b|sec\b|seconds\b|m\b|min\b)", low))
     mx = (int(m[1]) * (60 if m[2] and m[2].startswith("m") else 1)) if m else 0
     lo = max(mn + 2, 15) if mn else 20
     hi = min(mx, 60) if mx else (45 if mn else 60)
@@ -2360,6 +2414,9 @@ def clean_campaign(d):
                                   if s_(x, n)][:m]
     out["name"] = s_(d.get("name"), 80) or "New campaign"
     out["agency"] = s_(d.get("agency"), 40) or "Other"
+    out["site"] = s_(d.get("site"), 20) if s_(d.get("site"), 20) in SITE_NAMES else ""
+    url = s_(d.get("campaign_url"), 300)
+    out["campaign_url"] = url if url.startswith(("http://", "https://")) else ""
     out["platforms"] = [p for p in lst(d.get("platforms")) if p in ("TikTok", "Instagram Reels", "YouTube Shorts", "X")]
     out["source_note"] = s_(d.get("source_note"), 300)
     out["music"] = bool(d.get("music"))
@@ -3846,6 +3903,8 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
   <div class="cdgrid">
    <label>Campaign name<input type="text" id="cf_name"></label>
    <label>Agency (who runs it)<input type="text" id="cf_agency"></label>
+   <label>Found on (site)<select id="cf_site"><option value="">Not set</option></select></label>
+   <label>Campaign page link (to submit posts)<input type="text" id="cf_campaign_url" placeholder="https://…"></label>
    <label class="wide">Platforms
      <span class="chips" id="cf_platforms">
        <label><input type="checkbox" value="TikTok"> TikTok</label><label><input type="checkbox" value="Instagram Reels"> Instagram</label>
@@ -3888,9 +3947,11 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
 <div class="tabs"><button type="button" class="tab on" data-t="jobs">Jobs</button>
   <button type="button" class="tab" data-t="history">History</button>
   <button type="button" class="tab" data-t="results">📈 Results</button>
-  <button type="button" class="tab" data-t="projects">📁 Projects</button></div>
+  <button type="button" class="tab" data-t="projects">📁 Projects</button>
+  <button type="button" class="tab" data-t="sites">🔎 Find work</button></div>
 <div id="results" style="display:none"></div>
 <div id="projects" style="display:none"></div>
+<div id="sites" style="display:none"></div>
 <dialog id="trdlg" class="cdlg">
  <div class="cdhead"><b>✂️ Trim <span id="trname"></span></b><button type="button" class="small" onclick="trClose()">✕</button></div>
  <video id="trvid" controls playsinline style="width:100%;max-height:46vh;background:#000;border-radius:10px"></video>
@@ -4252,7 +4313,7 @@ $('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testing�
 /* ---------- campaign builder ---------- */
 let cdEditId='';
 const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist','manual_checks'],
-      TXTF=['name','agency','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate','logo'];
+      TXTF=['name','agency','site','campaign_url','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate','logo'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){
   const box=$('#cf_files');
@@ -4273,8 +4334,16 @@ async function cdFiles(){
       <span>${f.zip?'🗜️':'🎬'} ${esc(f.name)} ${tag}</span>
       <span class="m">${d} · ${mb} · ${ago(f.mtime)}</span></label>`}).join('');
 }
-let cdLogo=null;
+let cdLogo=null, siteOpts=0;
+async function cdSiteOptions(){
+  if(siteOpts)return; siteOpts=1;
+  try{const r=await api('/api/sites');
+    $('#cf_site').innerHTML='<option value="">Not set</option>'+
+      r.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  }catch(e){siteOpts=0}
+}
 function cdFill(c){
+  cdSiteOptions().then(()=>{$('#cf_site').value=c.site||''});
   TXTF.forEach(k=>$('#cf_'+k).value=c[k]??'');
   LISTF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join(', '));
   LINEF.forEach(k=>$('#cf_'+k).value=(c[k]||[]).join('\n'));
@@ -4499,9 +4568,9 @@ $('#rvdone').onclick=async()=>{
 /* ---------- tabs + history ---------- */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
-  ['jobs','history','results','projects'].forEach(t=>$('#'+t).style.display=b.dataset.t===t?'':'none');
+  ['jobs','history','results','projects','sites'].forEach(t=>$('#'+t).style.display=b.dataset.t===t?'':'none');
   if(b.dataset.t==='history')loadHistory(); if(b.dataset.t==='results')loadResults();
-  if(b.dataset.t==='projects')loadProjects();
+  if(b.dataset.t==='projects')loadProjects(); if(b.dataset.t==='sites')loadSites();
 });
 async function loadHistory(){
   const h=await api('/api/history'), el=$('#history');
@@ -4557,6 +4626,36 @@ async function loadResults(){
       <td><input value="${p.likes??''}" data-id="${p.id}" data-k="likes" onchange="updPost(this)" style="width:60px"></td>
       <td><button class="small" onclick="delPost('${p.id}')">✕</button></td></tr>`}).join('')}</table>
     <div style="font-size:11px;color:var(--dim);margin-top:8px">* views ÷ 1,000 × the campaign's pay rate. Ignores minimum payouts, caps and fees, so it's a rough guide.</div>`;
+}
+/* ---------- find work: the sites that list campaigns ---------- */
+async function loadSites(){
+  const r=await api('/api/sites'), el=$('#sites'), now=Date.now()/1000;
+  const when=t=>{if(!t)return '';const h=(now-t)/3600;
+    return h<1?'checked just now':h<24?'checked '+Math.round(h)+'h ago':'checked '+Math.round(h/24)+'d ago'};
+  el.innerHTML=`<div class="s" style="font-size:13px;color:var(--dim);margin-bottom:10px">
+      Places that list paid clipping campaigns. Open one, find a campaign you like, then copy its rules
+      and press <b>＋ New campaign</b> to set it up here. Tick a site off once you've had a look today.</div>
+    ${r.map(s=>{const old=!s.checked||now-s.checked>20*3600;
+      return `<div class="projroot" style="margin-bottom:8px">
+        <div class="row" style="align-items:center;gap:8px">
+          <b style="flex:1">${esc(s.name)}</b>
+          <span class="s" style="font-size:11.5px;color:${old?'var(--dim)':'var(--ok)'}">${old?'':'✓ '}${esc(when(s.checked))}</span>
+        </div>
+        <div class="s" style="font-size:12.5px;color:var(--dim);margin:4px 0 6px">${esc(s.note)}</div>
+        ${s.campaigns.length?`<div class="s" style="font-size:12px;color:var(--acc2);margin-bottom:6px">
+            Your campaigns here: ${s.campaigns.map(esc).join(', ')}</div>`:''}
+        <div class="row" style="gap:8px">
+          <a class="small" href="${esc(s.url)}" target="_blank" rel="noopener"
+             onclick="siteChecked('${s.id}',0)" style="text-decoration:none">🔗 Open</a>
+          <button type="button" class="small" onclick="siteChecked('${s.id}',${old?0:1})">
+            ${old?'Mark as checked':'Checked - undo'}</button>
+        </div></div>`}).join('')}
+    <div class="s" style="font-size:12px;color:var(--dim);margin-top:10px">
+      Tip: sign up to two or three of these so there's always something to clip when one runs dry.</div>`;
+}
+async function siteChecked(id,clear){
+  await api('/api/sites/checked',{id:id,clear:clear?1:0});
+  if($('#sites').style.display!=='none')loadSites();
 }
 /* ---------- projects folder ---------- */
 const fmtSize=b=>b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':b>=1e3?Math.round(b/1e3)+' KB':(b||0)+' B';
@@ -5484,11 +5583,23 @@ def serve_ui(args):
                 for cid, name, agency in list_campaigns():
                     c = json.loads((campaign_dir(cid) / "campaign.json").read_text())
                     out.append({"id": cid, "name": name, "agency": agency,
+                                "site": c.get("site") or "", "campaign_url": c.get("campaign_url") or "",
                                 "music": c.get("music", True), "on_screen": c.get("on_screen"),
                                 "platforms": c.get("platforms") or [], "rate": c.get("rate"),
                                 "mention": c.get("mention") or "", "mentions": c.get("mentions") or {},
                                 "best": best_settings(c, campaign_dir(cid))})
                 self.send_json(out)
+            elif u.path == "/api/sites":
+                seen, mine = sites_checked(), {}
+                for cid, name, _ in list_campaigns():
+                    try:
+                        s = json.loads((campaign_dir(cid) / "campaign.json").read_text()).get("site") or ""
+                    except (OSError, ValueError):
+                        s = ""
+                    if s:
+                        mine.setdefault(s, []).append(name)
+                self.send_json([dict(s, checked=seen.get(s["id"], 0), campaigns=mine.get(s["id"], []))
+                                for s in SITES])
             elif u.path == "/api/sources":
                 self.send_json(sources(parse_qs(u.query).get("campaign", [""])[0]))
             elif u.path == "/api/clipstyle":
@@ -5621,6 +5732,18 @@ def serve_ui(args):
                 except OSError as e:
                     return self.send_json({"ok": False, "msg": str(e)})
                 self.send_json({"ok": True, "path": str((base / name).resolve())})
+            elif u.path == "/api/sites/checked":
+                sid = str(d.get("id") or "")
+                if sid not in SITE_NAMES:
+                    return self.send_json({"error": "No such site"}, 404)
+                import time as _t
+                seen = sites_checked()
+                seen[sid] = 0 if d.get("clear") else int(_t.time())
+                try:
+                    sites_file().write_text(json.dumps(seen))
+                except OSError:
+                    pass
+                self.send_json({"ok": True, "checked": seen[sid]})
             elif u.path == "/api/projects/set":
                 if any(j["status"] in ("running", "queued") for j in jobs.values()):
                     return self.send_json({"ok": False, "msg": "Wait for the running jobs to finish first"})

@@ -9,13 +9,17 @@ use `py -3 clipper.py ...` instead of `./clipper.py ...`, and Downloads is `%USE
 
 ## The main job: "here's a campaign brief"
 
-When the user pastes a campaign brief (the rules page from Whop etc.), do all of this without being asked
-for each step:
+When the user pastes a campaign brief (the rules page from Whop, ClipAffiliates, Vyro, Elev8or,
+Clipping.net, Clip Farm, FindClout or Zula – see `SITES` in clipper.py), do all of this without being
+asked for each step:
 
 1. **Read the brief carefully** and write `campaigns/<agency>/<campaign-name>/campaign.json`
    (lower-case, hyphenated folder names; agency = who runs it, e.g. `clipping-culture`, `clipflow`).
    Also save the brief text as `brief.txt` in the same folder. Fields (see `CAMPAIGN_FIELDS`):
    - `name`, `agency`, `platforms` (any of `TikTok`, `Instagram Reels`, `YouTube Shorts`, `X`)
+   - `site` – which site it was found on: one of the ids in `SITES` (`whop`, `clipaffiliates`, `vyro`,
+     `elev8or`, `clippingnet`, `clipfarm`, `findclout`, `zula`). Leave `""` if it's somewhere else.
+   - `campaign_url` – the campaign's own page, where the user submits their posts
    - `rate` – pay per 1,000 views in $ (best platform). Ask the user if the brief doesn't say.
    - `source_note` – the content-folder link
    - `music` – **false** if added/background music is banned (very common)

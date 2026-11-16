@@ -156,9 +156,32 @@ By default campaigns live in `campaigns/` next to clipper and free clips in `~/C
 *Move my existing campaigns & clips into it* to bring everything along. Campaigns then go straight in that
 folder and free clips in its *Free clips* sub-folder. **Back to default** undoes it.
 
+## 🔎 Find work – where the campaigns are
+
+The **🔎 Find work** tab lists the sites that pay for clips, so you always know where to look when one
+runs dry:
+
+| Site | Good for |
+| --- | --- |
+| **Whop – Content Rewards** | The biggest one. Most campaigns, pays per 1,000 views |
+| **ClipAffiliates** | No application needed; views read straight from TikTok/YouTube/Instagram |
+| **Vyro** | Bigger names and celebrity content |
+| **Elev8or** | Clipping bounties, low minimum before you can withdraw |
+| **Clipping.net** | Campaign based, works much like Content Rewards |
+| **Clip Farm** | Runs its campaigns on Whop, so you're paid through Whop |
+| **FindClout** | Steadier payout terms, smaller choice of campaigns |
+| **Zula.chat** | TikTok and Instagram only – no YouTube Shorts |
+
+Press **🔗 Open** to go to a site (that also ticks it off for the day), or **Mark as checked** if you had a
+look elsewhere. Anything checked in the last 20 hours shows a green ✓, so you can see at a glance what
+you've already been through today. Sites where you already run campaigns list them underneath.
+
+Sign up to two or three. Then it's the same loop for all of them: find a campaign → copy its rules →
+**+ New** in clipper → clip → post → submit the link.
+
 ## Setting up a campaign from a brief
 
-Every campaign has a brief (the rules page on Whop). Clipper needs those rules – music allowed or not,
+Every campaign has a brief (the rules page on Whop, ClipAffiliates, Vyro…). Clipper needs those rules – music allowed or not,
 who to tag, #ad, platforms, clip length, on-screen text – so it can make clips that get approved.
 Pick whichever way suits you:
 
@@ -359,6 +382,11 @@ entered a model in the AI box, otherwise by pattern-matching), lists the videos 
 ticking the ones whose names match – and **🚀 Publish campaign** creates the campaign folder and moves the
 ticked footage into it (videos inside zips are unpacked). ✏️ next to the list edits a campaign later.
 
+The brief reader also works out **which site the campaign came from** (Whop, ClipAffiliates, Vyro…) and
+picks up the campaign's own link out of the brief, so you can get back to it to submit your posts. Both
+show in the campaign editor as *Found on* and *Campaign page link*, and the **🔎 Find work** tab lists
+your campaigns under the site they came from.
+
 If a brief has an **approved captions** list that must be copied word for word, clipper spots it and the
 *Captions must be copied word for word* box is ticked – each clip then gets one approved caption exactly
 as written, with nothing added.
@@ -370,6 +398,8 @@ Campaigns aren't included in this repo – make your own. Drop a `something.json
 {
   "name": "Example Game Trailer",
   "agency": "Some Agency",
+  "site": "whop",
+  "campaign_url": "https://whop.com/…  (the campaign's own page, where you submit your posts)",
   "platforms": ["TikTok", "Instagram Reels"],
   "music": false,
   "min_len": 10,
