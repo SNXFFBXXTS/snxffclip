@@ -100,6 +100,13 @@ Command-line equivalents: `--no-laughs --no-laugh-tail --no-chat --no-smart-word
   that ends on the payoff, a *long* one with more setup and reaction, and *look2* in the other style with
   its most gripping line on screen as a hook. Great when a campaign only has a little footage.
 
+## 🎬 Montage
+
+The **🎬 Montage** button on a batch joins the best part of its top 3 clips (different moments only) into
+one video, with each part's captions and a hook line on top (the campaign's on-screen text if it has
+one). It's clearly an original edit – TikTok marks plain re-posts of campaign footage as "unoriginal" and
+won't show them on For You. Command line: `--montage CLIP1.mp4 CLIP2.mp4 [CLIP3.mp4]`.
+
 ## Face tracking and trimming
 
 **Zoom** style follows the speaker's face instead of always cutting out the middle of a wide video: it

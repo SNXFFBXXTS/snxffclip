@@ -1665,6 +1665,126 @@ def plan_broll(clip, words, broll_pool, n_start=0):
     return inserts
 
 
+def best_line(words):
+    """The most gripping short sentence in some words - for an on-screen hook."""
+    sents, cur = [], []
+    for w in words:
+        cur.append(str(w[2]).strip())
+        if re.search(r"[.!?]$", cur[-1]):
+            sents.append(" ".join(cur))
+            cur = []
+    sents = [x for x in sents if 3 <= len(x.split()) <= 12] or sents
+    if not sents:
+        return None
+    best = max(sents, key=lambda x: len(HYPE.findall(x)) * 2 + len(FUNNY.findall(x)) * 2 +
+               len(OPINION.findall(x)) + (1 if "?" in x else 0) - len(x.split()) / 20)
+    return " ".join(best.split()[:12])
+
+
+def payoff_window(words, start, end, lo=5.0, hi=11.0):
+    """Shorten a clip to its last few sentences (where the payoff usually is): lo..hi seconds."""
+    if end - start <= hi:
+        return start, end
+    ends = [w[1] for w in words if start <= w[0] <= end and re.search(r"[.!?]$", str(w[2]).strip())]
+    last = (max(ends) + 0.4) if ends else end
+    if end - last <= 3.5:
+        last = end                                  # keep what follows the last line (often the laugh)
+    inside = [w for w in words if start <= w[0] <= end]
+    starts = [w[0] for k, w in enumerate(inside)
+              if k == 0 or re.search(r"[.!?]$", str(inside[k - 1][2]).strip())]
+    for s0 in sorted(starts, reverse=True):
+        if last - s0 >= lo:
+            if last - s0 <= hi + 3:
+                return max(start, s0 - 0.25), min(end, last)
+            break
+    return max(start, last - hi), min(end, last)
+
+
+def montage_mode(args):
+    """Join the best part of 2-4 clips into one video with a hook title on top -
+    clearly an original edit, which TikTok and co. reward (and plain re-posts don't get)."""
+    import time
+    clips = [Path(c).expanduser() for c in args.montage]
+    parts = []
+    for c in clips:
+        sf = c.with_suffix(".clip.json")
+        if not sf.is_file():
+            print(f"  ! skipping {c.name} (no saved settings)")
+            continue
+        sd = json.loads(sf.read_text())
+        if sd.get("montage") or (not is_url(sd["source"]) and not Path(sd["source"]).is_file()):
+            print(f"  ! skipping {c.name}")
+            continue
+        parts.append((c, sd))
+    if len(parts) < 2:
+        die("need at least 2 clips (with their original videos still on the PC) to make a montage")
+    parts = parts[:4]
+    first = parts[0][1]
+    args.mode = first.get("mode", "blur")
+    args.track = first.get("track", True)
+    args.captions = first.get("captions", True)
+    args.logo, args.logo_pos = first.get("logo"), first.get("logo_pos", "auto")
+    args.music, args.on_screen = None, None
+    args.cut_pauses = first.get("cut_pauses_opt", True)
+    if first.get("style"):
+        args.fixed_style = first["style"]
+    hook = first.get("on_screen")
+    if not hook:
+        allw = [tuple(w) for _, sd in parts for w in sd.get("words", [])]
+        hook = best_line(allw) or f"{len(parts)} best moments"
+    out = parts[0][0].parent / f"montage-{time.strftime('%d%b-%H%M')}.mp4"
+    print(f"> montage of {len(parts)} clips -> {out.name}")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        made, total, all_words, best_score, tags = [], 0.0, [], -9.0, ["🎬 montage"]
+        used = []
+        for k, (c, sd) in enumerate(parts, 1):
+            words = [tuple(w) for w in sd.get("words", [])]
+            s0, e0 = payoff_window(words, sd["start"], sd["end"])
+            if any(src_ == sd["source"] and s0 < b_ and e0 > a_ for src_, a_, b_ in used):
+                print(f"  skipping {c.stem} - same moment as an earlier part")
+                continue
+            used.append((sd["source"], s0, e0))
+            po = tmp / f"part{k}.mp4"
+            print(f"  part {k}: {c.stem}")
+            make_clip(sd["source"], round(s0, 2), round(e0, 2), po, args, words, meta={}, broll=None)
+            made.append(po)
+            m = sd.get("meta") or {}
+            best_score = max(best_score, float(m.get("score", 0)))
+            tags += [t for t in m.get("tags", []) if t not in tags and not t.startswith("😴")]
+        if len(made) < 2:
+            die("those clips are all the same moment - pick clips of different moments")
+        ins, chain = [], ""
+        for k, f in enumerate(made):
+            ins += ["-i", str(f)]
+            chain += f"[{k}:v][{k}:a]"
+            total += duration_of(f) or 0
+        graph = f"{chain}concat=n={len(made)}:v=1:a=1[cv][ca]"
+        subs = build_ass([], 0, tmp, dict(CAPTION_PRESETS["highlight"]), overlay=hook, duration=total)
+        if subs:
+            fd = f":fontsdir='{ff_filter_path(FONTS_DIR)}'" if FONTS_DIR.is_dir() else ""
+            graph += f";[cv]subtitles='{ff_filter_path(subs)}'{fd}[v]"
+        else:
+            graph += ";[cv]null[v]"
+        part = out.with_name(out.name + ".part")
+        try:
+            ff(["ffmpeg", "-loglevel", "error", "-y", *ins, "-filter_complex", graph, "-map", "[v]", "-map", "[ca]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4", str(part)])
+            os.replace(part, out)
+        finally:
+            part.unlink(missing_ok=True)
+    side = {"montage": True, "parts": [str(c) for c, sd in parts if any(u[0] == sd["source"] for u in used)],
+            "on_screen": hook,
+            "meta": {"score": round(best_score + 0.5, 3), "len": round(total, 1), "tags": tags[:4],
+                     "visual": False, "kw": 0, "mix": False}}
+    out.with_suffix(".clip.json").write_text(json.dumps(side))
+    cap = parts[0][0].with_suffix(".txt")
+    if cap.is_file():
+        out.with_suffix(".txt").write_text(cap.read_text())
+    print(f"  saved {out}")
+
+
 def variations_mode(args):
     """Three new versions of one clip: a tight short cut, a longer one with more context,
     and the same moment in the other look with a hook line on screen."""
@@ -4191,7 +4311,8 @@ async function loadClips(){
       <span style="display:flex;gap:8px;align-items:center">${(()=>{const n=g.clips.filter(c=>(c.checks||[]).length).length;return n?`<span class="gwarn">⚠ ${n} need a look</span>`:''})()}
       <span class="s" style="color:var(--dim);font-size:12px">${g.clips.length} clip${g.clips.length==1?"":"s"}</span>
       <button class="gbtn" onclick="review(${gi})">🎬 Review</button>
-      <button class="gbtn" onclick="planGroup(${gi})">🗓 Plan</button></span></div>
+      <button class="gbtn" onclick="planGroup(${gi})">🗓 Plan</button>
+      ${g.clips.filter(c=>c.styled).length>=2?`<button class="gbtn" onclick="montage(${gi})" title="Join the best part of the top 3 clips into one video with a hook title - an original edit TikTok won't flag as a re-post">🎬 Montage</button>`:''}</span></div>
     <div class="grid">${g.clips.map(c=>`
       <div class="clip" data-path="${esc(c.path)}">
         <div class="vw"><video controls playsinline preload="none" poster="/thumb/${enc(c.path)}?v=${c.v}" src="/clips/${enc(c.path)}?v=${c.v}"></video>
@@ -4464,6 +4585,11 @@ async function shareClip(btn,path){
     if(e.name==='NotAllowedError')btn.textContent='↗ tap again';   // download took a while: next tap shares at once
     else btn.textContent='↗';
   }
+}
+async function montage(gi){
+  const g=lastGroups[gi], top=g.clips.filter(c=>c.styled).slice(0,3);
+  if(!confirm(`Make a montage from the best part of:\n\n${top.map(c=>'• '+c.name).join('\n')}\n\nIt's saved as a new clip in this batch.`))return;
+  const r=await api('/api/montage',{paths:top.map(c=>c.path)}); if(r.error){alert(r.error);return} poll();
 }
 async function variations(path){
   const r=await api('/api/variations',{path}); if(r.error){alert(r.error);return} poll();
@@ -4746,6 +4872,8 @@ def serve_ui(args):
                     cmd += ["--trim-start", f"{p['trim'][0]:.2f}", "--trim-end", f"{p['trim'][1]:.2f}"]
                 if p.get("variations"):
                     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--variations", p["restyle"]]
+                if p.get("montage"):
+                    cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--montage", *p["montage"]]
                 if p["match"]:
                     cmd.append("--match-colors")
                 run_job(job, cmd)
@@ -5019,7 +5147,8 @@ def serve_ui(args):
                 cap = f.with_suffix(".txt")
                 groups.setdefault(g, []).append(
                     {"path": f"{key}/{rel.as_posix()}", "name": f.stem, "mtime": f.stat().st_mtime,
-                     "v": int(f.stat().st_mtime), "styled": f.with_suffix(".clip.json").is_file(),
+                     "v": int(f.stat().st_mtime),
+                     "styled": f.with_suffix(".clip.json").is_file() and not f.stem.startswith("montage-"),
                      "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
                      "manual": camp.get("manual_checks") or [],
                      "posted": posted_count.get(f"{key}/{rel.as_posix()}", []),
@@ -5604,6 +5733,22 @@ def serve_ui(args):
                     order.append(jid)
                 q.put(job)
                 self.send_json({"id": jid})
+            elif u.path == "/api/montage":
+                fs = [safe(str(x)) for x in (d.get("paths") or [])][:4]
+                fs = [f for f in fs if f and f.with_suffix(".clip.json").is_file()]
+                if len(fs) < 2:
+                    return self.send_json({"error": "Need at least 2 clips that clipper made"}, 400)
+                params = {"restyle": str(fs[0]), "url": "montage", "style": "highlight", "match": False,
+                          "words": 3, "cap": {}, "montage": [str(f) for f in fs]}
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": f"🎬 Montage of {len(fs)} clips", "error": "", "made": 0,
+                       "k": len(fs), "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
             elif u.path == "/api/variations":
                 rel = str(d.get("path", ""))
                 f = safe(rel)
@@ -5768,6 +5913,8 @@ def main():
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
+    p.add_argument("--montage", nargs="+", metavar="CLIP.mp4",
+                   help="join the best part of 2-4 clips into one video with a hook title")
     p.add_argument("--no-laughs", dest="laughs", action="store_false", help="don't listen for laughter")
     p.add_argument("--no-laugh-tail", dest="laugh_tail", action="store_false",
                    help="don't run clips on to include a laugh after the punchline")
@@ -5851,6 +5998,8 @@ def main():
         return restyle_mode(args)
     if args.variations:
         return variations_mode(args)
+    if args.montage:
+        return montage_mode(args)
     if args.ui:
         args.out_dir = args.out_dir or OUT_DIR
         args.out_dir.mkdir(parents=True, exist_ok=True)
