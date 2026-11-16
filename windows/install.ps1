@@ -44,8 +44,8 @@ foreach ($c in "git", "ffmpeg", "yt-dlp", "py") {
 Say "Getting clipper"
 if (Test-Path (Join-Path $dir ".git")) { git -C $dir pull --ff-only } else { git clone $repo $dir }
 
-Say "Installing the speech recogniser (faster-whisper) - a few minutes"
-py -3 -m pip install --user --upgrade --quiet faster-whisper numpy
+Say "Installing the speech recogniser and face tracking - a few minutes"
+py -3 -m pip install --user --upgrade --quiet faster-whisper numpy opencv-python-headless
 
 Say "Making a Clipper shortcut on your desktop"
 $desk = [Environment]::GetFolderPath("Desktop")

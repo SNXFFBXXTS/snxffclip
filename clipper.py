@@ -268,6 +268,10 @@ def gpu_status():
         st["msg"] = f"Driver OK ({st['gpu'].split(',')[0]}). Press Set up GPU to add the CUDA libraries (about 1 GB, no sudo)."
     else:
         st["msg"] = "Driver and CUDA libraries are there but the card didn't start - restart the PC, then try again."
+    st["faces"] = face_tracking_available()
+    st["msg"] += (" · 🙂 Face tracking on (Zoom follows the speaker)" if st["faces"] else
+                  " · Face tracking off - to switch it on run:  pip install --user --break-system-packages "
+                  "opencv-python-headless  (Windows: py -3 -m pip install --user opencv-python-headless)")
     return st
 
 
@@ -988,10 +992,153 @@ def logo_xy(raw: Path, mode: str, pos: str):
             "top-left": ("48", "190"), "top-center": ("(W-w)/2", "120")}.get(pos, ("W-w-48", "190"))
 
 
+def video_dims(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=width,height", "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        w, h = (int(x) for x in r.stdout.strip().split(",")[:2])
+        return w, h
+    except ValueError:
+        return None
+
+
+def face_tracking_available():
+    try:
+        import cv2                                   # noqa: F401  (pip: opencv-python-headless)
+        return True
+    except ImportError:
+        return False
+
+
+def face_model(name):
+    """OpenCV's face-detector file: shipped with OpenCV 4, downloaded once otherwise (OpenCV 5 dropped them)."""
+    try:
+        import cv2
+        p = Path(getattr(cv2, "data", None).haarcascades) / name
+        if p.is_file():
+            return p
+    except (ImportError, AttributeError, TypeError):
+        pass
+    p = CACHE / "face" / name
+    if p.is_file() and p.stat().st_size > 10000:
+        return p
+    try:
+        import urllib.request
+        p.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/{name}"
+        data = urllib.request.urlopen(url, timeout=30).read()
+        if b"<opencv_storage>" in data[:500]:
+            p.write_bytes(data)
+            return p
+    except OSError:
+        pass
+    return None
+
+
+def face_track_x(raw: Path):
+    """Zoom mode: follow the main face instead of always cutting out the middle.
+    Returns an ffmpeg expression for the crop's x position over time, or None (= centre)."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    import numpy as np
+    dims = video_dims(raw)
+    if not dims:
+        return None
+    rw, rh = dims
+    sw = rw * H / rh                                  # width after scaling to 1920 high
+    if sw <= W * 1.05:
+        return None                                   # already (nearly) vertical - nothing to follow
+    fps, fh = 3, 360
+    fw = int(round(rw * fh / rh / 2) * 2)
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(raw), "-an", "-vf",
+                        f"fps={fps},scale={fw}:{fh},format=gray", "-f", "rawvideo", "-"], capture_output=True)
+    a = np.frombuffer(r.stdout, dtype=np.uint8)
+    n = a.size // (fw * fh)
+    if n < 2:
+        return None
+    front_f, side_f = face_model("haarcascade_frontalface_default.xml"), face_model("haarcascade_profileface.xml")
+    if not front_f:
+        print("  ! face model missing (no internet?) - keeping the middle")
+        return None
+    front = cv2.CascadeClassifier(str(front_f))
+    side = cv2.CascadeClassifier(str(side_f)) if side_f else cv2.CascadeClassifier()
+    xs, prev = [], None
+    for i in range(n):
+        img = a[i * fw * fh:(i + 1) * fw * fh].reshape(fh, fw)
+        found = [tuple(f) for f in front.detectMultiScale(img, 1.1, 4, minSize=(24, 24))]
+        if not found and not side.empty():
+            found = [tuple(f) for f in side.detectMultiScale(img, 1.1, 4, minSize=(24, 24))]
+            flip = cv2.flip(img, 1)
+            found += [(fw - x - w, y, w, h) for x, y, w, h in side.detectMultiScale(flip, 1.1, 4, minSize=(24, 24))]
+        best, bscore = None, 0
+        for x, y, w, h in found:
+            cx = (x + w / 2) / fw
+            near = 1.0 if prev is None else max(0.25, 1 - abs(cx - prev) * 2)
+            sc = w * h * near
+            if sc > bscore:
+                best, bscore = cx, sc
+        xs.append(best)
+        if best is not None:
+            prev = best
+    hits = sum(x is not None for x in xs)
+    if hits < max(2, 0.25 * n):
+        print("  no clear face to follow - keeping the middle")
+        return None
+    first = next(x for x in xs if x is not None)    # fill gaps: hold the last face position
+    filled, last = [], first
+    for x in xs:
+        last = x if x is not None else last
+        filled.append(last)
+    med = [sorted(filled[max(0, i - 2):i + 3])[len(filled[max(0, i - 2):i + 3]) // 2] for i in range(n)]
+    # a calm "camera": ignore small moves, glide to new positions, cut on big jumps
+    cam, pos, far = [], med[0], 0
+    for t in med:
+        d = t - pos
+        far = far + 1 if abs(d) > 0.3 else 0
+        if far >= 2:
+            pos, far = t, 0                           # speaker / shot changed: cut straight there
+        elif abs(d) > 0.06:
+            pos += d * 0.35
+        cam.append(pos)
+    maxx = sw - W
+    px = [min(max(c * sw - W / 2, 0), maxx) for c in cam]
+    pts = [(i / fps, p) for i, p in enumerate(px)]
+
+    def rdp(ps, eps=10):                              # keep only the points that matter
+        if len(ps) < 3:
+            return ps
+        (t0, x0), (t1, x1) = ps[0], ps[-1]
+        dmax, idx = 0, 0
+        for k in range(1, len(ps) - 1):
+            t, x = ps[k]
+            lin = x0 + (x1 - x0) * (t - t0) / ((t1 - t0) or 1)
+            if abs(x - lin) > dmax:
+                dmax, idx = abs(x - lin), k
+        if dmax > eps:
+            return rdp(ps[:idx + 1], eps)[:-1] + rdp(ps[idx:], eps)
+        return [ps[0], ps[-1]]
+    key = rdp(pts)[:80]
+    print(f"  following the speaker's face ({hits}/{n} frames)")
+    if len(key) == 1 or max(p for _, p in key) - min(p for _, p in key) < 6:
+        return f"{key[0][1]:.0f}"
+    expr = f"{key[-1][1]:.0f}"
+    for (t0, x0), (t1, x1) in reversed(list(zip(key, key[1:]))):
+        dt = max(t1 - t0, 0.01)
+        expr = f"if(lt(t,{t1:.2f}),{x0:.0f}+({x1 - x0:.0f})*(t-{t0:.2f})/{dt:.2f},{expr})"
+    return expr
+
+
 def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0,
            logo=None, logo_pos="auto"):
-    if mode == "crop":      # zoom to fill, cut the sides off
-        v = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0]"
+    if mode == "crop":      # zoom to fill, cut the sides off - following the face if we can see one
+        fx = face_track_x(raw)
+        if fx:
+            v = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                 f"crop={W}:{H}:x='{fx}':y='(ih-{H})/2'[v0]")
+        else:
+            v = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0]"
     elif mode == "blur":    # whole video in the middle, blurred copy behind
         v = (f"[0:v]split[a][b];"
              f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
@@ -1053,7 +1200,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
             segs = transcribe(raw, args.model, cache=False)
             win = [(w[0] + start, w[1] + start, w[2]) for s in segs for w in s["words"]]
         need_video = getattr(args, "style", None) == "auto" or getattr(args, "match_colors", False)
-        style = resolve_style(args, raw if need_video else None, win, end - start)
+        style = getattr(args, "fixed_style", None) or resolve_style(args, raw if need_video else None,
+                                                                     win, end - start)
         subs = build_ass(win if args.captions else [], start, tmp, style,
                          overlay=getattr(args, "on_screen", None), duration=end - start)
         music = pick_music(getattr(args, "music", None))
@@ -1145,7 +1293,7 @@ def restyle_mode(args):
         die(f"no saved settings for {clip.name} - it was made before Restyle existed, make it again")
     sd = json.loads(side_f.read_text())
     args.mode = sd.get("mode", args.mode)
-    args.captions = True
+    args.captions = sd.get("captions", True) if (args.trim_start is not None or args.trim_end is not None) else True
     args.music = sd.get("music")
     args.music_vol = sd.get("music_vol", 0.15)
     args.music_start = sd.get("music_start", 0.0)
@@ -1154,9 +1302,30 @@ def restyle_mode(args):
     src = sd["source"]
     if not is_url(src) and not Path(src).is_file():
         die(f"the original video isn't there any more: {src}")
-    print(f"> restyling {clip.name}")
-    make_clip(src, sd["start"], sd["end"], clip, args, [tuple(w) for w in sd.get("words", [])],
-              broll=sd.get("broll"))
+    start, end = sd["start"], sd["end"]
+    words = [tuple(w) for w in sd.get("words", [])]
+    if args.trim_start is not None or args.trim_end is not None:
+        start = max(0.0, args.trim_start if args.trim_start is not None else start)
+        end = args.trim_end if args.trim_end is not None else end
+        dur = duration_of(Path(src)) if not is_url(src) else None
+        if dur:
+            end = min(end, dur)
+        if end - start < 1:
+            die("the clip would be shorter than a second")
+        if sd.get("style"):
+            args.fixed_style = sd["style"]               # same look, new length
+        if sd.get("captions", True) and not is_url(src) and (start < sd["start"] - 0.05 or end > sd["end"] + 0.05):
+            try:                                        # captions for the extra bit: cached transcript
+                segs = transcribe(Path(src), args.model)
+                words = [tuple(w) for s_ in segs for w in s_.get("words", [])]
+            except (Exception, SystemExit) as e:        # noqa - keep going without the new words
+                print(f"  ! couldn't get captions for the extra part: {e}")
+        print(f"> trimming {clip.name}: {short_ts(sd['start'])}-{short_ts(sd['end'])} -> "
+              f"{short_ts(start)}-{short_ts(end)}")
+        sd.pop("broll", None)                           # b-roll timings belonged to the old length
+    else:
+        print(f"> restyling {clip.name}")
+    make_clip(src, start, end, clip, args, words, broll=sd.get("broll"))
 
 
 # ======================================================================
@@ -2616,6 +2785,8 @@ select:disabled{opacity:.45}
 .rtable input{width:80px;background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
 .rtable tr.stale input{border-color:#ffb03d}
 .rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
+.trrow{display:flex;gap:6px;align-items:center;margin-top:8px}.trrow b{width:44px}.trrow code{flex:1;text-align:center;font-size:14px}
+.trwords{font-size:12px;color:var(--dim);margin:3px 0 0 50px;min-height:16px}.trwords i{color:var(--text);font-style:normal;background:var(--line);padding:0 3px;border-radius:4px}
 .phurl{display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:8px;margin:6px 0}
 .phurl code{flex:1;word-break:break-all;font-size:12.5px}.phurl span{font-size:11px;color:var(--dim)}
 .fplist{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
@@ -2840,7 +3011,7 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
     <div class="field"><label>Style</label>
       <div class="seg" data-name="mode">
         <button type="button" data-v="blur" class="on">Blur bg</button>
-        <button type="button" data-v="crop">Zoom</button>
+        <button type="button" data-v="crop" title="Zoom to fill the screen - follows the speaker's face (needs face tracking: see the Speed box in ⚙️ AI)">Zoom</button>
         <button type="button" data-v="none">Original</button></div></div>
     <div class="field"><label>Transcription</label>
       <div class="seg" data-name="model">
@@ -2959,6 +3130,19 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
   <button type="button" class="tab" data-t="projects">📁 Projects</button></div>
 <div id="results" style="display:none"></div>
 <div id="projects" style="display:none"></div>
+<dialog id="trdlg" class="cdlg">
+ <div class="cdhead"><b>✂️ Trim <span id="trname"></span></b><button type="button" class="small" onclick="trClose()">✕</button></div>
+ <video id="trvid" controls playsinline style="width:100%;max-height:46vh;background:#000;border-radius:10px"></video>
+ <div class="s" style="font-size:12.5px;color:var(--dim);margin:6px 0" id="trinfo"></div>
+ <div class="trrow"><b>Start</b><button type="button" class="small" data-t="s" data-d="-1">−1s</button><button type="button" class="small" data-t="s" data-d="-0.25">−¼</button>
+   <code id="trs"></code><button type="button" class="small" data-t="s" data-d="0.25">+¼</button><button type="button" class="small" data-t="s" data-d="1">+1s</button></div>
+ <div class="trwords" id="trsw"></div>
+ <div class="trrow"><b>End</b><button type="button" class="small" data-t="e" data-d="-1">−1s</button><button type="button" class="small" data-t="e" data-d="-0.25">−¼</button>
+   <code id="tre"></code><button type="button" class="small" data-t="e" data-d="0.25">+¼</button><button type="button" class="small" data-t="e" data-d="1">+1s</button></div>
+ <div class="trwords" id="trew"></div>
+ <div class="row" style="margin-top:10px;gap:8px"><span id="trmsg" class="s" style="font-size:12.5px;flex:1;align-self:center"></span>
+   <button type="button" class="go" id="trgo" style="margin:0;width:auto;padding:10px 16px">Re-make clip</button></div>
+</dialog>
 <dialog id="phdlg" class="cdlg">
  <div class="cdhead"><b>📱 Use clipper on your phone</b><button type="button" class="small" onclick="$('#phdlg').close()">✕</button></div>
  <div id="phbody" style="font-size:13.5px"></div>
@@ -3438,6 +3622,7 @@ async function loadClips(){
         ${capButtons(c)}
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download title="Download to this device (phone: it lands in Downloads / your gallery)">📲 Save</a>
           ${CAN_SHARE?`<button title="Send straight to TikTok, Instagram, your gallery…" onclick="shareClip(this,'${esc(c.path).replace(/'/g,"\\'")}')">↗</button>`:''}
+          ${c.styled?`<button title="Move the start / end" onclick="trimDlg('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">✂️</button>`:''}
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
@@ -3697,6 +3882,36 @@ async function shareClip(btn,path){
     else btn.textContent='↗';
   }
 }
+/* ---------- trim: move a clip's start/end and re-make it ---------- */
+let tr=null;
+const fmtT=x=>{x=Math.max(0,x);const m=Math.floor(x/60),s=(x%60);return m+':'+(s<10?'0':'')+s.toFixed(2)};
+function trWordsNear(t,before){
+  const w=tr.words; if(!w.length)return '';
+  const i=w.findIndex(x=>x[0]>=t-0.02);
+  const a=w.slice(Math.max(0,(i<0?w.length:i)-4),i<0?w.length:i).map(x=>esc(x[2])).join(' ');
+  const b=(i<0?[]:w.slice(i,i+4)).map(x=>esc(x[2])).join(' ');
+  return `…${a} <span style="color:var(--acc)">|</span> <i>${b}</i>…`;
+}
+function trShow(){
+  $('#trs').textContent=fmtT(tr.s); $('#tre').textContent=fmtT(tr.e);
+  $('#trsw').innerHTML=trWordsNear(tr.s); $('#trew').innerHTML=trWordsNear(tr.e);
+  const ch=(tr.s!==tr.s0||tr.e!==tr.e0);
+  $('#trinfo').textContent=`New length ${(tr.e-tr.s).toFixed(1)}s (was ${(tr.e0-tr.s0).toFixed(1)}s). The | shows where it cuts in the speech.`;
+  $('#trgo').disabled=!ch;
+}
+async function trimDlg(path,name){
+  const r=await api('/api/clipinfo',{path}); if(r.error){alert("This clip can't be trimmed (it was made before trimming existed)");return}
+  if(!r.source_ok){alert("The original video isn't on the PC any more, so this clip can't be trimmed.");return}
+  tr={path,s:r.start,e:r.end,s0:r.start,e0:r.end,max:r.source_len||1e9,words:r.words||[]};
+  $('#trname').textContent=name; $('#trvid').src='/clips/'+enc(path)+'?t='+Date.now(); $('#trmsg').textContent='';
+  trShow(); $('#trdlg').showModal();
+}
+function trClose(){$('#trvid').pause();$('#trdlg').close()}
+document.querySelectorAll('#trdlg [data-t]').forEach(b=>b.onclick=()=>{
+  const d=+b.dataset.d; if(b.dataset.t==='s')tr.s=Math.max(0,Math.min(tr.e-1,+(tr.s+d).toFixed(2)));
+  else tr.e=Math.min(tr.max,Math.max(tr.s+1,+(tr.e+d).toFixed(2))); trShow()});
+$('#trgo').onclick=async()=>{const r=await api('/api/trim',{path:tr.path,start:tr.s,end:tr.e});
+  if(r.error){$('#trmsg').textContent=r.error;return} trClose(); poll()};
 /* ---------- phone dialog ---------- */
 async function phoneDlg(){
   const r=await api('/api/phone'), here=location.origin+'/';
@@ -3941,6 +4156,8 @@ def serve_ui(args):
             if p.get("restyle"):
                 cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--restyle", p["restyle"],
                        "--style", p["style"], "--words", str(p["words"]), "--cap-json", json.dumps(p["cap"])]
+                if p.get("trim"):
+                    cmd += ["--trim-start", f"{p['trim'][0]:.2f}", "--trim-end", f"{p['trim'][1]:.2f}"]
                 if p["match"]:
                     cmd.append("--match-colors")
                 run_job(job, cmd)
@@ -4759,6 +4976,45 @@ def serve_ui(args):
                 files = [str(x) for x in (d.get("files") or []) if isinstance(x, str)][:200]
                 moved = import_downloads(new_id, files) if files else []
                 self.send_json({"id": new_id, "moved": moved})
+            elif u.path == "/api/trim":
+                rel = str(d.get("path", ""))
+                f = safe(rel)
+                sf = f.with_suffix(".clip.json") if f else None
+                if not sf or not sf.is_file():
+                    return self.send_json({"error": "Can't trim that clip"}, 400)
+                sd = json.loads(sf.read_text())
+                try:
+                    ns, ne = float(d["start"]), float(d["end"])
+                except (KeyError, TypeError, ValueError):
+                    return self.send_json({"error": "Bad times"}, 400)
+                if ne - ns < 1 or ns < 0:
+                    return self.send_json({"error": "The clip must be at least a second long"}, 400)
+                with lock:
+                    if any(j.get("clip") == rel and j["status"] in ("queued", "running") for j in jobs.values()):
+                        return self.send_json({"error": "That clip is already being changed"}, 400)
+                params = {"restyle": str(f), "url": f.name, "style": "highlight", "match": False, "words": 3,
+                          "cap": {}, "trim": [ns, ne]}
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": f"✂️ Trim: {f.stem}", "error": "", "made": 0, "k": 1,
+                       "clip": rel, "dur": ne - ns, "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
+            elif u.path == "/api/clipinfo":
+                f = safe(str(d.get("path", "")))
+                sf = f.with_suffix(".clip.json") if f else None
+                if not sf or not sf.is_file():
+                    return self.send_json({"error": "no info"}, 400)
+                sd = json.loads(sf.read_text())
+                src = sd.get("source", "")
+                dur = None if is_url(src) else (duration_of(Path(src)) if Path(src).is_file() else None)
+                self.send_json({"start": sd.get("start"), "end": sd.get("end"), "source_len": dur,
+                                "source_ok": is_url(src) or Path(src).is_file(),
+                                "words": [w for w in sd.get("words", [])
+                                          if sd.get("start", 0) - 15 <= w[0] <= sd.get("end", 0) + 15][:600]})
             elif u.path == "/api/restyle":
                 rel = str(d.get("path", ""))
                 f = safe(rel)
@@ -4892,6 +5148,8 @@ def main():
     p.add_argument("--style", choices=["auto"] + list(CAPTION_PRESETS), default="auto",
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
+    p.add_argument("--trim-start", type=float, help="with --restyle: new start (seconds in the source video)")
+    p.add_argument("--trim-end", type=float, help="with --restyle: new end (seconds in the source video)")
     p.add_argument("--match-colors", action="store_true",
                    help="match caption colours to the video")
     p.add_argument("--cap-font", help="caption font name (see --fonts)")

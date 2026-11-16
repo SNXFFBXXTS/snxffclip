@@ -62,6 +62,21 @@ adds a **Clipper** shortcut to the desktop – double-click it and the page open
 while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
 again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
 
+## Face tracking and trimming
+
+**Zoom** style follows the speaker's face instead of always cutting out the middle of a wide video: it
+holds steady while they talk, glides when they move and cuts straight across when the shot or speaker
+changes. It needs OpenCV once:
+
+```fish
+pip install --user --break-system-packages opencv-python-headless
+```
+
+(Windows: the installer adds it.) The Speed box in **⚙️ AI** says whether it's on.
+
+**✂️ Trim** on any clip moves its start or end in ¼-second or 1-second steps – the words either side of
+each cut are shown so you can stop it chopping a sentence – then re-makes the clip in the same style.
+
 ## On your phone (📱)
 
 Press **📱** at the top of the page to see the links that work from your phone. With
