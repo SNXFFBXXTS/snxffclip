@@ -62,6 +62,26 @@ adds a **Clipper** shortcut to the desktop – double-click it and the page open
 while you use it. If it says something "still isn't found", open a new PowerShell window and paste the line
 again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI → *Set up GPU*.
 
+## On your phone (📱)
+
+Press **📱** at the top of the page to see the links that work from your phone. With
+[Tailscale](https://tailscale.com) on the PC and the phone (same account) it works anywhere, not just at home.
+
+One-time setup on the PC (Linux) – keeps clipper running in the background from boot and makes a
+**secure https link**:
+
+```fish
+cd ~/clipper; ./clipper.py --phone-setup
+```
+
+(If Tailscale says *access denied*, run `sudo tailscale set --operator=$USER` and try again; if it shows
+a link to turn on HTTPS, open it, switch HTTPS on, and run it again.) After that, restart clipper with
+`systemctl --user restart clipper` (⟳ Update still works too).
+
+On the phone open the **https** link in Chrome → ⋮ → **Add to Home screen** – Clipper becomes an app.
+Every clip then has **↗** (sends the video straight to TikTok, Instagram or your gallery and copies the
+caption) and **📲 Save** (downloads it).
+
 ## Your projects folder (📁 Projects)
 The **📁 Projects** tab under the main form shows everything in one place: every campaign with how much
 footage and how many clips it has, plus your *Free clips* (pasted links with no campaign), with 📂 buttons

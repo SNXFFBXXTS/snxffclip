@@ -51,6 +51,8 @@ for each step:
 
 - Web page: `./clipper.py --ui` (port 8765). Usually started with
   `pkill -f "clipper.py --ui"; nohup ~/clipper/clipper.py --ui > ~/clipper/ui.log 2>&1 & disown`
+  – unless the user has run `./clipper.py --phone-setup` (systemd user service "clipper"): then use
+  `systemctl --user restart clipper` and `journalctl --user -u clipper -f` for logs.
   The page has an ⟳ Update button that does `git pull` and restarts it.
 - Useful commands: `--bulk`, `--batch`, `--auto`, `--dry-run`, `--check`, `--restyle CLIP.mp4`,
   `--audio` (rip audio), `--fonts`. `./clipper.py -h` lists everything.

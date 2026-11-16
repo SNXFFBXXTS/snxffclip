@@ -2428,12 +2428,110 @@ def list_mode(args):
 # ======================================================================
 # web interface  (./clipper.py --ui)
 # ======================================================================
+PWA_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#020418"/>
+<text x="256" y="350" font-size="300" text-anchor="middle">👽</text></svg>"""
+PWA_MANIFEST = json.dumps({
+    "name": "Clipper", "short_name": "Clipper", "start_url": "/", "scope": "/", "display": "standalone",
+    "background_color": "#0e0f13", "theme_color": "#0e0f13",
+    "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]})
+# no offline caching - clipper only works while the PC is on anyway
+PWA_SW = "self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('fetch',()=>{});"
+
+
+def phone_setup(port):
+    """Linux: a systemd user service so the page is always on (starts with the PC), plus
+    'tailscale serve' for a secure https link (needed for the home-screen app + share-to-gallery)."""
+    import time
+    if WINDOWS:
+        print("On Windows: put the Clipper desktop shortcut in your Startup folder (Win+R → shell:startup)\n"
+              "and in Tailscale run:  tailscale serve --bg %d" % port)
+        return
+    me = Path(__file__).resolve()
+    unit = Path.home() / ".config" / "systemd" / "user" / "clipper.service"
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(f"""[Unit]
+Description=Clipper web page
+After=network-online.target
+
+[Service]
+WorkingDirectory={me.parent}
+ExecStart={sys.executable} {me} --ui --port {port}
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+""")
+    print(f"✓ wrote {unit}")
+    subprocess.run(["pkill", "-f", "clipper.py --ui"], capture_output=True)   # stop a copy started by hand
+    time.sleep(1)
+    ok = True
+    for cmd in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", "clipper"]):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            ok = False
+            print("! " + " ".join(cmd) + ": " + (r.stderr or r.stdout).strip())
+    if ok:
+        r = subprocess.run(["loginctl", "enable-linger", os.environ.get("USER", "")], capture_output=True, text=True)
+        print("✓ clipper now runs in the background and starts when the PC boots" +
+              ("" if r.returncode == 0 else " (after you log in)"))
+        print("  restart it with:  systemctl --user restart clipper")
+    else:
+        print("! couldn't set up the background service - start clipper by hand as before")
+    if shutil.which("tailscale"):
+        r = subprocess.run(["tailscale", "serve", "--bg", str(port)], capture_output=True, text=True, timeout=60)
+        txt = (r.stdout + r.stderr).strip()
+        if r.returncode == 0:
+            print("✓ secure link ready:\n" + txt)
+        else:
+            print("! Tailscale secure link not set up yet:\n  " + txt.replace("\n", "\n  ") +
+                  "\n  If it says 'access denied', run once:  sudo tailscale set --operator=$USER"
+                  "\n  If it gives a link to enable HTTPS, open it, switch HTTPS on, then run this again.")
+    else:
+        print("! Tailscale isn't installed - install it to reach clipper away from home")
+    print("Logs:  journalctl --user -u clipper -f")
+
+
+def phone_info(port):
+    """How to reach this clipper from a phone: Tailscale name / LAN address."""
+    out = {"tailscale": False, "urls": [], "https": False}
+    ts = shutil.which("tailscale")
+    if ts:
+        try:
+            r = subprocess.run([ts, "status", "--json"], capture_output=True, text=True, timeout=5)
+            st = json.loads(r.stdout or "{}")
+            name = ((st.get("Self") or {}).get("DNSName") or "").rstrip(".")
+            ips = (st.get("Self") or {}).get("TailscaleIPs") or []
+            if name:
+                out["tailscale"] = True
+                r2 = subprocess.run([ts, "serve", "status", "--json"], capture_output=True, text=True, timeout=5)
+                if '"443"' in (r2.stdout or "") or ":443" in (r2.stdout or ""):
+                    out["https"] = True
+                    out["urls"].append({"url": f"https://{name}/", "what": "Tailscale (secure) - best"})
+                out["urls"].append({"url": f"http://{name}:{port}/", "what": "Tailscale"})
+                out["urls"] += [{"url": f"http://{ip}:{port}/", "what": "Tailscale IP"} for ip in ips[:1]]
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    try:
+        import socket
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("10.255.255.255", 1))
+        out["urls"].append({"url": f"http://{sk.getsockname()[0]}:{port}/", "what": "Home Wi-Fi only"})
+        sk.close()
+    except OSError:
+        pass
+    return out
+
+
 UI_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0f13">
 <title>Clipper</title>
+<link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0e0f13">
+<link rel="apple-touch-icon" href="/icon.svg"><meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>👽</text></svg>">
 <script>try{var t=localStorage.getItem('clipper_theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 <style>
@@ -2514,6 +2612,8 @@ select:disabled{opacity:.45}
 .rtable input{width:80px;background:var(--field);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px}
 .rtable tr.stale input{border-color:#ffb03d}
 .rsec{font-size:13px;color:var(--dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:1px}
+.phurl{display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:8px;margin:6px 0}
+.phurl code{flex:1;word-break:break-all;font-size:12.5px}.phurl span{font-size:11px;color:var(--dim)}
 .fplist{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
 .fplist div{padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13.5px}
 .fplist div:hover{background:var(--line)}
@@ -2672,6 +2772,7 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
 <h1>👽 <span>Clipper</span>
   <select id="themepick" class="themepick" title="Theme" style="margin-left:auto">
     <option value="">Woke as fuck</option><option value="sharks">San Jose Sharks</option><option value="snxff">SNXFFBXXTS</option></select>
+  <button type="button" class="small" onclick="phoneDlg()" title="Use clipper on your phone">📱</button>
   <button type="button" class="small" id="updbtn" title="Get the latest clipper from GitHub">⟳ Update</button>
   <button type="button" class="small" id="aibtn">⚙️ AI</button></h1>
 <div id="readybar" class="readybar" style="display:none"><span id="readytxt"></span>
@@ -2854,6 +2955,10 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
   <button type="button" class="tab" data-t="projects">📁 Projects</button></div>
 <div id="results" style="display:none"></div>
 <div id="projects" style="display:none"></div>
+<dialog id="phdlg" class="cdlg">
+ <div class="cdhead"><b>📱 Use clipper on your phone</b><button type="button" class="small" onclick="$('#phdlg').close()">✕</button></div>
+ <div id="phbody" style="font-size:13.5px"></div>
+</dialog>
 <dialog id="fpdlg" class="cdlg">
  <div class="cdhead"><b>Choose your projects folder</b><button type="button" class="small" onclick="$('#fpdlg').close()">✕</button></div>
  <div class="s" style="font-size:12.5px;color:var(--dim);margin:6px 0 8px">All your campaigns, footage and clips will live in this folder.
@@ -3327,7 +3432,8 @@ async function loadClips(){
         ${platRow(c)}
         ${(c.checks||[]).length?`<div class="warns">${c.checks.map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}</div>`:''}
         ${capButtons(c)}
-        <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download>Save</a>
+        <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download title="Download to this device (phone: it lands in Downloads / your gallery)">📲 Save</a>
+          ${CAN_SHARE?`<button title="Send straight to TikTok, Instagram, your gallery…" onclick="shareClip(this,'${esc(c.path).replace(/'/g,"\\'")}')">↗</button>`:''}
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
           <button onclick="del('${esc(c.path).replace(/'/g,"\\'")}')">Delete</button></div>
@@ -3569,6 +3675,36 @@ function buildPlan(){
       <button class="small" onclick="plPosted(${i})">✓ Posted</button></div>`});
   $('#pllist').innerHTML=html||'<div class="empty">Nothing left to post from this batch 🎉</div>';
 }
+/* ---------- phones: share a clip straight to TikTok / Instagram / gallery (needs the https link) ---------- */
+const CAN_SHARE=!!(navigator.canShare&&window.isSecureContext&&/Android|iPhone|iPad/i.test(navigator.userAgent));
+const blobCache={};
+async function shareClip(btn,path){
+  const name=path.split('/').pop();
+  try{
+    if(!blobCache[path]){btn.textContent='⏳';
+      const b=await (await fetch('/clips/'+enc(path))).blob(); blobCache[path]=new File([b],name,{type:'video/mp4'})}
+    btn.textContent='↗';
+    const f=blobCache[path];
+    if(!navigator.canShare({files:[f]})){location.href='/clips/'+enc(path)+'?dl=1';return}
+    const cap=capStore[path]; if(cap){try{await navigator.clipboard.writeText(cap)}catch(e){}}
+    await navigator.share({files:[f]});
+  }catch(e){
+    if(e.name==='NotAllowedError')btn.textContent='↗ tap again';   // download took a while: next tap shares at once
+    else btn.textContent='↗';
+  }
+}
+/* ---------- phone dialog ---------- */
+async function phoneDlg(){
+  const r=await api('/api/phone'), here=location.origin+'/';
+  $('#phbody').innerHTML=(r.urls.length?r.urls.map(u=>`<div class="phurl"><code>${esc(u.url)}</code><span>${esc(u.what)}</span>
+      <button type="button" class="small" onclick="copyText('${esc(u.url)}',this)">Copy</button></div>`).join(''):'<p>No network address found.</p>')+
+    (r.tailscale?'':'<p>⚠ Tailscale isn\'t running on this PC - only the Home Wi-Fi link works, and only at home.</p>')+
+    (r.https?'':'<p>Tip: run the phone setup once (see the README) to get the <b>secure https link</b> - that lets you add Clipper to your home screen and send clips straight to your gallery, TikTok or Instagram.</p>')+
+    `<p style="color:var(--dim)">You're on: <code>${esc(here)}</code>${window.isSecureContext?' 🔒':''}</p>`+
+    `<p style="color:var(--dim)">On the phone: open the link in Chrome → ⋮ → <b>Add to Home screen</b>. Then on any clip: <b>↗</b> sends it straight to TikTok, Instagram or your gallery (the caption gets copied too), <b>📲 Save</b> downloads it.</p>`;
+  $('#phdlg').showModal();
+}
+if('serviceWorker' in navigator&&window.isSecureContext){try{navigator.serviceWorker.register('/sw.js')}catch(e){}}
 function campOf(path){const key=path.split('/')[0]; return camps[key.replace(/~/g,'/')]||{}}
 function capFor(path,plat){
   let t=capStore[path]||''; const camp=campOf(path), tags=camp.mentions||{}, main=camp.mention||'', want=tags[plat];
@@ -4218,6 +4354,19 @@ def serve_ui(args):
 
         def do_GET(self):
             u = urlparse(self.path)
+            if u.path in ("/manifest.json", "/sw.js", "/icon.svg"):
+                body, ctype = {"/manifest.json": (PWA_MANIFEST, "application/manifest+json"),
+                               "/sw.js": (PWA_SW, "text/javascript"),
+                               "/icon.svg": (PWA_ICON, "image/svg+xml")}[u.path]
+                body = body.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if u.path == "/api/phone":
+                return self.send_json(phone_info(args.port))
             if u.path == "/":
                 body = UI_HTML.encode()
                 self.send_response(200)
@@ -4751,6 +4900,8 @@ def main():
     p.add_argument("--cap-pop", choices=["on", "off"], help="pop-in animation on/off")
     p.add_argument("--cap-json", help=argparse.SUPPRESS)
     p.add_argument("--fonts", action="store_true", help="list fonts you can use")
+    p.add_argument("--phone-setup", action="store_true",
+                   help="run clipper in the background from boot (Linux) and set up the secure Tailscale link")
     p.add_argument("--check", metavar="CAMPAIGN", help="check a campaign's settings against its brief, and its clips")
     p.add_argument("--gpu", action="store_true", help="show whether the graphics card can be used")
     p.add_argument("--speedtest", metavar="VIDEO", help="compare CPU vs graphics card on a video's first minute")
@@ -4786,6 +4937,8 @@ def main():
             for w in chk:
                 print(f"       ⚠ {w}")
         return
+    if args.phone_setup:
+        return phone_setup(args.port)
     if args.fonts:
         print("\n".join(list_fonts()))
         print(f"\nAdd more: put .ttf/.otf files in {FONTS_DIR}")
