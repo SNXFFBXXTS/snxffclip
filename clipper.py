@@ -719,7 +719,7 @@ def is_question(t):
     return bool(re.search(r"\?[\"')\]]*\s*$", (t or "").strip()))
 
 
-def build_candidates(segs, min_len, max_len, target):
+def build_candidates(segs, min_len, max_len, target, qa=True):
     """Every sentence-aligned window between min_len and max_len seconds.
     Interview-aware: never end on a question, and don't end part-way through
     the answer to a question asked inside the clip."""
@@ -748,10 +748,10 @@ def build_candidates(segs, min_len, max_len, target):
                 break
             if dur < min_len:
                 continue
-            if is_question(segs[j]["text"]):
+            if qa and is_question(segs[j]["text"]):
                 continue                           # never end on a question (answer would be cut)
             cut_answer = 0.0
-            if last_q is not None and not answer_done(j):
+            if qa and last_q is not None and not answer_done(j):
                 cut_answer = 8.0                   # mid-answer to a question asked in the clip
             if ends_sentence(segs[j]["text"]):
                 over = max(0.0, dur - max_len) * 3     # overrunning is allowed but discouraged
@@ -796,7 +796,7 @@ def clean_bounds(segs, i, j, pre=0.45, post=1.1):
     return max(0.0, start), end
 
 
-def score_candidates(cands, segs, loud, laugh=None):
+def score_candidates(cands, segs, loud, laugh=None, words=True):
     import numpy as np
     feats = []
     if laugh is None:
@@ -820,7 +820,8 @@ def score_candidates(cands, segs, loud, laugh=None):
                                                                      # starts a new sentence
             1.0 if re.match(r"(and|but|or|because|which|that|then)\b", first, re.I) else 0.0,
                                                                      # starts mid-thought
-        ] + content_feats(c, segs, laugh, dur, nwords))
+        ] + (content_feats(c, segs, laugh, dur, nwords) if words
+             else [content_feats(c, segs, laugh, dur, nwords)[0], 0, 0, 0, 0, 0]))
     F = np.array(feats)
     Z = (F - F.mean(axis=0)) / (F.std(axis=0) + 1e-6)
     #                 loud spike hook hype rate end new mid | laugh funny opinion filler ramble q&a
@@ -2776,7 +2777,8 @@ def find_moments(src, args, lo, hi, target):
         if not cands:
             die("video too short to use")
         print(f"  no real speech - picking by movement and sound ({len(cands)} options)")
-        add_chat_bonus(src, cands)
+        if getattr(args, "chat", True):
+            add_chat_bonus(src, cands)
         learn = load_learning()
         if learn:
             for c in cands:
@@ -2784,23 +2786,27 @@ def find_moments(src, args, lo, hi, target):
             cands.sort(key=lambda c: c["score"], reverse=True)
         return segs, cands
     loud = loudness_curve(src)
-    segs = split_sentences(segs)                   # answers and questions become separate pieces
-    cands = build_candidates(segs, lo, hi, target)
+    if getattr(args, "qa", True):
+        segs = split_sentences(segs)               # answers and questions become separate pieces
+    cands = build_candidates(segs, lo, hi, target, qa=getattr(args, "qa", True))
     if not cands:
         die(f"no {args.len}s windows found - try a different --len")
     try:
+        if not getattr(args, "laughs", True):
+            raise RuntimeError("turned off")
         laugh = reaction_curve(src, segs)
         n_laughs = int(((laugh[1:] >= 0.45) & (laugh[:-1] < 0.45)).sum()) if len(laugh) > 1 else 0
         if n_laughs:
             print(f"  heard {n_laughs} laugh / reaction moment(s)")
     except Exception as e:                         # noqa - never let this stop clipping
-        print(f"  (laugh detection skipped: {e})")
+        print(f"  (laugh detection {'off' if str(e) == 'turned off' else 'skipped: ' + str(e)})")
         laugh = None
-    cands = score_candidates(cands, segs, loud, laugh)
-    if laugh is not None:
+    cands = score_candidates(cands, segs, loud, laugh, words=getattr(args, "smart_words", True))
+    if laugh is not None and getattr(args, "laugh_tail", True):
         for c in cands:
             extend_for_laugh(c, segs, laugh)
-    add_chat_bonus(src, cands, len(loud))
+    if getattr(args, "chat", True):
+        add_chat_bonus(src, cands, len(loud))
     camp = getattr(args, "campaign_data", None)
     kws = [k.lower() for k in (camp or {}).get("keywords", []) if k]
     if kws:
@@ -3243,6 +3249,8 @@ pre{white-space:pre-wrap;font-size:11.5px;background:var(--field);padding:10px;b
   background:linear-gradient(90deg,var(--acc),var(--acc3));color:#fff;font-size:12px;font-weight:600}
 select:disabled{opacity:.45}
 .capdet{margin-top:10px}
+.smartgrid{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin:8px 0 4px}
+@media (max-width:620px){.smartgrid{grid-template-columns:1fr}}
 .rvman{display:flex;gap:10px;align-items:flex-start;background:#2a2110;border:1px solid #6b5420;border-radius:10px;
   padding:8px 10px;margin:0 0 8px;font-size:12.5px;color:#ffd98a}
 .rvman input{width:20px;height:20px;margin-top:2px;accent-color:#ffb03d;flex-shrink:0}
@@ -3496,14 +3504,28 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
         <button type="button" data-v="none">Original</button></div>
       <label class="toggle" id="trackbox" style="display:none;margin-top:6px" title="Turn off when there's more than one person in shot - Zoom then keeps the middle">
         <input type="checkbox" id="track" checked> 🙂 Follow face</label>
-      <label class="toggle" style="margin-top:6px" title="Cut silent pauses and um/uh out of each clip - tighter clips keep viewers watching. Laughs and reactions are kept.">
-        <input type="checkbox" id="cutp" checked> ✂️ Cut pauses</label></div>
+    </div>
     <div class="field"><label>Transcription</label>
       <div class="seg" data-name="model">
         <button type="button" data-v="base.en">Fast</button>
         <button type="button" data-v="small.en" class="on">Good</button>
         <button type="button" data-v="medium.en">Best</button></div></div>
   </div>
+  <details class="capdet smartdet"><summary>✨ Smart picking: <b id="smartsum">all on</b></summary>
+   <div class="smartgrid">
+    <label class="toggle" title="Listens for laughter and crowd reactions and prefers clips with them">
+      <input type="checkbox" class="smart" data-k="laughs" checked> 😂 Laugh &amp; reaction detection</label>
+    <label class="toggle" title="If people laugh right after the punchline, the clip runs on so the laugh is in it">
+      <input type="checkbox" class="smart" data-k="laugh_tail" checked> 🎤 Keep the laugh after the punchline</label>
+    <label class="toggle" title="Stream links: grabs the chat replay and prefers moments where chat went wild">
+      <input type="checkbox" class="smart" data-k="chat" checked> 💬 Stream chat highlights</label>
+    <label class="toggle" title="Prefers funny lines and strong opinions; marks down filler and rambling">
+      <input type="checkbox" class="smart" data-k="words" checked> 🤣 Funny lines &amp; opinions, skip boring bits</label>
+    <label class="toggle" title="Cuts silent pauses and um/uh out of each clip - tighter clips keep viewers watching. Laughs and reactions are kept.">
+      <input type="checkbox" class="smart" data-k="cut_pauses" id="cutp" checked> ✂️ Cut pauses &amp; ums</label>
+    <label class="toggle" title="Never end on a question or halfway through someone's answer">
+      <input type="checkbox" class="smart" data-k="qa" checked> 🎙️ Interview-aware endings</label>
+   </div></details>
   <label class="toggle"><input type="checkbox" id="caps" checked> Burn in captions</label>
   <details id="capdet" class="capdet"><summary>Caption style: <b id="capsum">✨ Auto</b></summary>
    <div id="capbody">
@@ -3712,8 +3734,13 @@ function trackShow(){const z=document.querySelector('.seg[data-name=mode] button
 document.querySelectorAll('.seg[data-name=mode] button').forEach(b=>b.addEventListener('click',()=>setTimeout(trackShow,0)));
 try{const t=localStorage.getItem('clipper_track'); if(t!==null)$('#track').checked=t==='1'}catch(e){}
 $('#track').onchange=()=>{try{localStorage.setItem('clipper_track',$('#track').checked?'1':'0')}catch(e){}};
-try{const t=localStorage.getItem('clipper_cutp'); if(t!==null)$('#cutp').checked=t==='1'}catch(e){}
-$('#cutp').onchange=()=>{try{localStorage.setItem('clipper_cutp',$('#cutp').checked?'1':'0')}catch(e){}};
+function smartOpts(){const o={};document.querySelectorAll('.smart').forEach(b=>o[b.dataset.k]=b.checked);return o}
+function smartSum(){const o=smartOpts(),off=Object.values(o).filter(v=>!v).length;
+  $('#smartsum').textContent=off?`${Object.keys(o).length-off} of ${Object.keys(o).length} on`:'all on'}
+try{const t=JSON.parse(localStorage.getItem('clipper_smart')||'{}');
+  document.querySelectorAll('.smart').forEach(b=>{if(b.dataset.k in t)b.checked=!!t[b.dataset.k]})}catch(e){}
+document.querySelectorAll('.smart').forEach(b=>b.onchange=()=>{try{localStorage.setItem('clipper_smart',JSON.stringify(smartOpts()))}catch(e){};smartSum()});
+smartSum();
 document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
   seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -3882,7 +3909,7 @@ $('#bulkk').oninput=e=>$('#bulkkv').textContent=+e.target.value?e.target.value:'
 $('#bulkgo').onclick=async()=>{
   const b=$('#bulkgo'); b.disabled=true;
   const r=await api('/api/jobs',{bulk:true,move_dl:$('#mvdlbox').style.display!=='none'&&$('#mvdl').checked,url:'',k:+$('#bulkk').value,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,smart:smartOpts(),campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -3892,7 +3919,7 @@ $('#bulkgo').onclick=async()=>{
 $('#batchgo').onclick=async()=>{
   const b=$('#batchgo'); b.disabled=true;
   const r=await api('/api/jobs',{batch:true,url:'',k:0,len:opt.len,mode:opt.mode,model:opt.model,
-    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
+    captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,smart:smartOpts(),campaign:$('#camp').value,style:cs.preset,match:cs.match,words:cs.words,
     cap:{font:cs.font,size:cs.size,text:cs.text,highlight:cs.hlon?cs.hl:'',outline:cs.out,pos:cs.pos,upper:cs.upper,pop:cs.pop},
     music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   b.disabled=false;
@@ -4039,7 +4066,7 @@ $('#f').onsubmit=async e=>{
   e.preventDefault();
   $('#go').disabled=true;
   const r=await api('/api/jobs',{url:$('#url').value.trim(),k:+$('#k').value,len:opt.len,mode:opt.mode,
-    model:opt.model,captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
+    model:opt.model,captions:$('#caps').checked,track:$('#track').checked,cut_pauses:$('#cutp').checked,smart:smartOpts(),campaign:$('#camp').value,style:cs.auto?'auto':cs.preset,match:cs.match,words:cs.words,cap:capPayload(),music:$('#music').value,music_vol:+$('#mvol').value/100,ollama:$('#ollama').value.trim()});
   $('#go').disabled=false;
   if(r.error){alert(r.error);return}
   $('#url').value='';
@@ -4680,6 +4707,10 @@ def serve_ui(args):
                 cmd.append("--no-track")
             if not p.get("cut_pauses", True):
                 cmd.append("--keep-pauses")
+            for k, flag in (("laughs", "--no-laughs"), ("laugh_tail", "--no-laugh-tail"), ("chat", "--no-chat"),
+                            ("words", "--no-smart-words"), ("qa", "--no-interview-endings")):
+                if not (p.get("smart") or {}).get(k, True):
+                    cmd.append(flag)
             if p["ollama"]:
                 cmd += ["--ollama", p["ollama"]]
             if p["music"]:
@@ -5212,6 +5243,8 @@ def serve_ui(args):
                     "captions": bool(d.get("captions", True)),
                     "track": bool(d.get("track", True)),
                     "cut_pauses": bool(d.get("cut_pauses", True)),
+                    "smart": {k: bool(v) for k, v in (d.get("smart") or {}).items()
+                              if k in ("laughs", "laugh_tail", "chat", "words", "qa")},
                     "music": music, "music_vol": music_vol, "campaign": camp,
                     "style": d.get("style") if d.get("style") in ["auto", *CAPTION_PRESETS] else "auto",
                     "match": bool(d.get("match")),
@@ -5671,6 +5704,14 @@ def main():
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
+    p.add_argument("--no-laughs", dest="laughs", action="store_false", help="don't listen for laughter")
+    p.add_argument("--no-laugh-tail", dest="laugh_tail", action="store_false",
+                   help="don't run clips on to include a laugh after the punchline")
+    p.add_argument("--no-chat", dest="chat", action="store_false", help="ignore stream chat replays")
+    p.add_argument("--no-smart-words", dest="smart_words", action="store_false",
+                   help="don't score funny lines / opinions / filler")
+    p.add_argument("--no-interview-endings", dest="qa", action="store_false",
+                   help="allow clips to end on a question or mid-answer")
     p.add_argument("--keep-pauses", dest="cut_pauses", action="store_false",
                    help="don't cut silent pauses and um/uh out of clips")
     p.add_argument("--trim-start", type=float, help="with --restyle: new start (seconds in the source video)")

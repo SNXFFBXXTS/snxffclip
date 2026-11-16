@@ -72,6 +72,14 @@ campaign keywords. Clips lose points for **filler** ("um", "you know", "basicall
 sentences. If people laugh right after the last line, the clip keeps the laugh. The reasons show under
 each clip (😂 laughter, 🤣 funny line, 🔥 strong opinion, 🪝 hook opening, 😴 lots of filler).
 
+## ✨ Smart picking switches
+
+Under the Style buttons, **✨ Smart picking** has a tick box for each feature (remembered per browser):
+😂 laugh & reaction detection · 🎤 keep the laugh after the punchline · 💬 stream chat highlights ·
+🤣 funny lines & opinions (and skipping boring bits) · ✂️ cut pauses & ums · 🎙️ interview-aware endings.
+Command-line equivalents: `--no-laughs --no-laugh-tail --no-chat --no-smart-words --keep-pauses
+--no-interview-endings`. 🙂 Follow face appears under Style when Zoom is picked.
+
 ## Tighter clips, stream chat and variations
 
 - **✂️ Cut pauses** (on by default, under Style): silent pauses longer than ~0.6 s and "um/uh" are cut
