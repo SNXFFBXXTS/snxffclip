@@ -1817,6 +1817,95 @@ def montage_mode(args):
     print(f"  saved {out}")
 
 
+PLATFORM_CUT = {                   # tag, share of the campaign's length range, why
+    "TikTok": ("tiktok", 0.15, "tightest cut - TikTok rewards people watching to the end"),
+    "Instagram Reels": ("reels", 0.5, "middle length"),
+    "YouTube Shorts": ("shorts", 0.9, "longest - more setup, Shorts viewers sit through more"),
+    "X": ("x", 0.35, "short cut"),
+}
+
+
+def campaign_near(p: Path):
+    """The campaign a clip belongs to, by walking up from the clip to a campaign.json."""
+    for up in list(p.parents)[:6]:
+        f = up / "campaign.json"
+        if f.is_file():
+            try:
+                return clean_campaign(json.loads(f.read_text()))
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def per_platform_mode(args):
+    """One genuinely different cut per platform, instead of the same file posted three times.
+
+    Posting one identical file everywhere is what platforms read as reposted content - it was
+    TikTok's stated reason for restricting this account. Each platform gets its own length and
+    its own starting moment, inside whatever the campaign's rules allow."""
+    clip = Path(args.per_platform).expanduser()
+    sf = clip.with_suffix(".clip.json")
+    if not sf.is_file():
+        die("no saved settings for that clip - make it again first")
+    sd = json.loads(sf.read_text())
+    src, start, end = sd["source"], sd["start"], sd["end"]
+    if not is_url(src) and not Path(src).is_file():
+        die(f"the original video isn't there any more: {src}")
+    camp = getattr(args, "campaign_data", None) or campaign_near(clip) or {}
+    plats = [p for p in (camp.get("platforms") or ["TikTok", "Instagram Reels", "YouTube Shorts"])
+             if p in PLATFORM_CUT]
+    if len(plats) < 2:
+        die("this campaign only allows one platform - nothing to vary")
+
+    try:
+        lo, hi = (float(x) for x in str(camp.get("len") or args.len).split("-"))
+    except ValueError:
+        lo, hi = 15.0, 40.0
+    lo = max(lo, float(camp.get("min_len") or 0))
+    args.captions = sd.get("captions", True)
+    args.music, args.music_vol = sd.get("music"), sd.get("music_vol", 0.15)
+    args.music_start = sd.get("music_start", 0.0)
+    args.logo, args.logo_pos = sd.get("logo"), sd.get("logo_pos", "auto")
+    args.track = sd.get("track", True)
+    args.mode = sd.get("mode", "blur")
+    args.on_screen = sd.get("on_screen") or ""
+    if sd.get("style"):
+        args.fixed_style = sd["style"]
+    words = [tuple(w) for w in sd.get("words", [])]
+    if not is_url(src):
+        try:                                       # the whole transcript, so cuts can breathe
+            words = [tuple(w) for s_ in transcribe(Path(src), args.model) for w in s_.get("words", [])] or words
+        except (Exception, SystemExit):
+            pass
+    # moments we're allowed to start on: sentence starts near the clip, else the clip's own start
+    starts = sorted({w[0] for k, w in enumerate(words)
+                     if start - 12 <= w[0] <= end - lo
+                     and (k == 0 or re.search(r"[.!?]$", str(words[k - 1][2]).strip()))} | {start})
+    dur = duration_of(Path(src)) if not is_url(src) else end + 60
+    made, used = 0, []
+    for n, plat in enumerate(plats):
+        tag, where, why = PLATFORM_CUT[plat]
+        want = lo + (hi - lo) * where
+        aim = start + n * 2.5                      # each opens on a different moment
+        s0 = min((s for s in starts if all(abs(s - u) > 1.5 for u in used)),
+                 key=lambda s: abs(s - aim), default=aim)
+        e0 = min(s0 + want, dur - 0.1)
+        if e0 - s0 < max(lo, 4):                   # ran out of video - pull the start back
+            s0 = max(0.0, e0 - want)
+        if e0 - s0 < 4:
+            continue
+        used.append(s0)
+        out = clip.with_name(f"{clip.stem}-{tag}.mp4")
+        print(f"\n> {plat}: {why}")
+        make_clip(src, round(s0, 2), round(e0, 2), out, args, words,
+                  meta=(sd.get("meta") or {}) | {"variant": True, "platform": plat})
+        cap = clip.with_suffix(".txt")
+        if cap.is_file():
+            out.with_suffix(".txt").write_text(caption_for(cap.read_text().strip(), camp, plat) + "\n")
+        made += 1
+    print(f"\nmade {made} cut(s) - one per platform, each a different length and a different moment")
+
+
 def variations_mode(args):
     """Three new versions of one clip: a tight short cut, a longer one with more context,
     and the same moment in the other look (on-screen text only if the brief asks)."""
@@ -2688,10 +2777,14 @@ def clip_scan(f: Path):
 
 def overlaps_sibling(f: Path, side: dict):
     """Is this clip (nearly) the same stretch of footage as another clip beside it?
-    Two near-identical posts is what gets an account flagged for unoriginal content."""
+    Two near-identical posts is what gets an account flagged for unoriginal content.
+    Deliberate per-platform cuts of one moment are meant to overlap, so they're exempt -
+    they go to different places and are each a different length."""
     src, a, b = side.get("source"), side.get("start"), side.get("end")
     if not src or a is None or b is None:
         return ""
+    mine = (side.get("meta") or {}).get("platform")
+    base = re.sub(r"-(?:" + "|".join(t for t, _, _ in PLATFORM_CUT.values()) + r")$", "", f.stem)
     for g in sorted(f.parent.glob("*.clip.json")):
         if g.name == f.with_suffix(".clip.json").name:
             continue
@@ -2701,6 +2794,11 @@ def overlaps_sibling(f: Path, side: dict):
             continue
         if o.get("source") != src or o.get("start") is None:
             continue
+        theirs = (o.get("meta") or {}).get("platform")
+        if (mine or theirs) and base == re.sub(
+                r"-(?:" + "|".join(t for t, _, _ in PLATFORM_CUT.values()) + r")$",
+                "", g.name[:-len(".clip.json")]):
+            continue                               # same moment, cut on purpose for another platform
         shared = min(b, o["end"]) - max(a, o["start"])
         if shared > 0 and shared / max(0.1, min(b - a, o["end"] - o["start"])) >= 0.5:
             return g.name[:-len(".clip.json")]
@@ -2745,7 +2843,10 @@ def clip_checks(f: Path, c=None):
             side = {}
     if c and cap:
         if c.get("exact_captions"):
-            if cap not in [x.strip() for x in c.get("example_captions", [])]:
+            ok = [x.strip() for x in c.get("example_captions", [])]
+            # a cut made for one platform carries that platform's @tag, which is still approved
+            ok += [caption_for(x, c, p) for x in ok for p in (c.get("mentions") or {})]
+            if cap not in ok:
                 out.append("Caption isn't one of the approved ones")
         else:
             if c.get("mention") and c["mention"].lower() not in cap.lower() and \
@@ -4747,6 +4848,7 @@ async function loadClips(){
         <div class="a"><a href="/clips/${enc(c.path)}?dl=1" download title="Download to this device (phone: it lands in Downloads / your gallery)">📲 Save</a>
           ${CAN_SHARE?`<button title="Send straight to TikTok, Instagram, your gallery…" onclick="shareClip(this,'${esc(c.path).replace(/'/g,"\\'")}')">↗</button>`:''}
           ${c.styled?`<button title="Make up to 3 different versions: shorter, longer, other look" onclick="variations('${esc(c.path).replace(/'/g,"\\'")}')">🎲</button>`:''}
+          ${c.styled?`<button title="One different cut per platform - so you're not posting the same file to all three" onclick="perPlatform('${esc(c.path).replace(/'/g,"\\'")}')">📱</button>`:''}
           ${c.styled?`<button title="Move the start / end" onclick="trimDlg('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">✂️</button>`:''}
           ${c.styled?`<button class="rs" title="Change the caption style" onclick="restyle('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">🎨</button>`:''}
           <button title="Log where you posted it" onclick="logPost('${esc(c.path).replace(/'/g,"\\'")}','${esc(c.name).replace(/'/g,"\\'")}')">📊</button>
@@ -5047,6 +5149,9 @@ async function montage(gi){
 async function variations(path){
   const r=await api('/api/variations',{path}); if(r.error){alert(r.error);return} poll();
 }
+async function perPlatform(path){
+  const r=await api('/api/perplatform',{path}); if(r.error){alert(r.error);return} poll();
+}
 /* ---------- trim: move a clip's start/end and re-make it ---------- */
 let tr=null;
 const fmtT=x=>{x=Math.max(0,x);const m=Math.floor(x/60),s=(x%60);return m+':'+(s<10?'0':'')+s.toFixed(2)};
@@ -5325,6 +5430,9 @@ def serve_ui(args):
                     cmd += ["--trim-start", f"{p['trim'][0]:.2f}", "--trim-end", f"{p['trim'][1]:.2f}"]
                 if p.get("variations"):
                     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--variations", p["restyle"]]
+                if p.get("per_platform"):
+                    cmd = [sys.executable, "-u", str(Path(__file__).resolve()),
+                           "--per-platform", p["restyle"]]
                 if p.get("montage"):
                     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--montage", *p["montage"]]
                 if p["match"]:
@@ -6245,6 +6353,22 @@ def serve_ui(args):
                     order.append(jid)
                 q.put(job)
                 self.send_json({"id": jid})
+            elif u.path == "/api/perplatform":
+                rel = str(d.get("path", ""))
+                f = safe(rel)
+                if not f or not f.with_suffix(".clip.json").is_file():
+                    return self.send_json({"error": "Can't make platform cuts of that clip"}, 400)
+                params = {"restyle": str(f), "url": f.name, "style": "highlight", "match": False, "words": 3,
+                          "cap": {}, "per_platform": True}
+                jid = uuid.uuid4().hex[:8]
+                job = {"id": jid, "params": params, "status": "queued", "stage": "Waiting in queue",
+                       "progress": 0, "title": f"📱 One per platform: {f.stem}", "error": "", "made": 0, "k": 3,
+                       "clip": rel, "log": deque(maxlen=300), "proc": None}
+                with lock:
+                    jobs[jid] = job
+                    order.append(jid)
+                q.put(job)
+                self.send_json({"id": jid})
             elif u.path == "/api/clipinfo":
                 f = safe(str(d.get("path", "")))
                 sf = f.with_suffix(".clip.json") if f else None
@@ -6393,6 +6517,8 @@ def main():
                    help="caption look (default: auto = best for each clip)")
     p.add_argument("--restyle", metavar="CLIP.mp4", help="re-render a clip with new caption settings")
     p.add_argument("--variations", metavar="CLIP.mp4", help="make 3 different versions of a clip")
+    p.add_argument("--per-platform", metavar="CLIP.mp4",
+                   help="one different cut per platform, so you're not posting the same file 3 times")
     p.add_argument("--bulk-montage", action="store_true",
                    help="with --bulk: also make a montage of the funniest short bits")
     p.add_argument("--montage", nargs="+", metavar="CLIP.mp4",
@@ -6480,6 +6606,8 @@ def main():
         return restyle_mode(args)
     if args.variations:
         return variations_mode(args)
+    if args.per_platform:
+        return per_platform_mode(args)
     if args.montage:
         return montage_mode(args)
     if args.ui:

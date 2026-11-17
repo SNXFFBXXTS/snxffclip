@@ -78,13 +78,33 @@ If even that can't work, it says exactly why in plain words (*"only 9s long – 
 least 15s"*) and moves on to the next video instead of failing the whole batch. Each clip shows which
 rung it came from in Review, e.g. *picked on movement and sound*.
 
+### 📱 One cut per platform
+
+Posting the identical file to TikTok, Instagram and YouTube is what platforms read as reposted
+content – TikTok's own restriction notice says a video is unoriginal when it's *"just imported or
+copied from other sources without any new, creative edits"*. Press **📱** on a clip and you get one
+cut per platform the campaign allows, each a different length and starting on a different moment,
+all inside the campaign's own rules:
+
+| Platform | Cut |
+| --- | --- |
+| TikTok | tightest – it rewards people watching to the end |
+| Instagram Reels | middle length |
+| YouTube Shorts | longest – Shorts viewers sit through more setup |
+
+Each one is saved with its own caption, carrying that platform's required @tag (so a YouTube cut gets
+`@SEGA_West` added where the brief asks for it). They deliberately overlap, so the duplicate warning
+below knows to leave them alone. From the command line: `./clipper.py --per-platform CLIP.mp4`.
+
 ### Safety nets
 
 So you don't have to watch everything, clipper checks every clip it makes and flags the dodgy ones with
-⚠ in Review – **almost silent**, **frozen** (a still or title card), **black screen**, **nearly the same
-footage as another clip** (two near-identical posts is what gets an account flagged for unoriginal
-content), **ends mid-word**, under the campaign's minimum length, low-res source, and captions missing a
-required tag or disclosure. Batches show *"⚠ 3 need a look"* so you only review the flagged ones.
+⚠ in Review – **almost silent**, **frozen** (a still or title card), **black screen**, **opens on a
+blank frame** (TikTok flags that as low quality, and it's what got one of these clips restricted),
+**nearly the same footage as another clip** (two near-identical posts is what gets an account flagged
+for unoriginal content), **ends mid-word**, under the campaign's minimum length, low-res source, and
+captions missing a required tag or disclosure. Clips also shift their start off an empty opening frame
+automatically, so that one shouldn't come up. Batches show *"⚠ 3 need a look"* so you only review the flagged ones.
 
 ### Scoring
 

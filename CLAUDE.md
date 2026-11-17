@@ -67,6 +67,15 @@ and shows in Review via `clip_pick()`.
 If none work, `die(too_short_why(...))` says exactly why in plain words; `bulk_mode` catches it, prints
 `! skipped <file>` and carries on with the next video.
 
+`per_platform_mode()` (`--per-platform CLIP.mp4`, 📱 in Review) makes one cut per platform the campaign
+allows – different length and different starting moment each, from `PLATFORM_CUT` – because posting one
+identical file everywhere is what platforms read as reposted content. Each cut's `.txt` caption goes
+through `caption_for()` so it carries that platform's required @tag. These cuts overlap on purpose, so
+`overlaps_sibling()` skips them and the approved-caption check accepts the per-platform tag swap.
+
+`skip_blank_start()` nudges a clip's start off an empty opening frame (`blank_frame()` – near black,
+near white or flat colour). TikTok restricted one of the user's posts over exactly this.
+
 `clip_checks()` holds the safety nets that flag clips with ⚠ in Review – near-silent, frozen, black,
 near-duplicate of a sibling clip (`overlaps_sibling()`), ends mid-word, under the campaign minimum,
 low-res source, caption missing a required tag. `clip_scan()` gets loudness/freeze/black from one
