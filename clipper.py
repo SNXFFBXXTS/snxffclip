@@ -200,6 +200,47 @@ def fetch_chat(url, vid):
 CAP_RES = "scale='if(gt(iw,ih),-2,min(iw,1440))':'if(gt(iw,ih),min(ih,1440),-2)'"
 
 
+def frame_flatness(src, t):
+    """How empty the picture is at time t -> (brightness 0-255, variation 0-255).
+    A near-black, near-white or flat-colour frame has very little variation."""
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}",
+                            "-i", str(src), "-frames:v", "1", "-vf", "scale=32:18",
+                            "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0 or len(r.stdout) < 32 * 18:
+            return None
+        import numpy as _np
+        a = _np.frombuffer(r.stdout[:32 * 18], dtype=_np.uint8).astype(_np.float32)
+        return float(a.mean()), float(a.std())
+    except (OSError, subprocess.SubprocessError, ImportError, ValueError):
+        return None
+
+
+def blank_frame(src, t):
+    """Is the picture at time t effectively empty? TikTok marks a clip that opens on one
+    as low quality, so it's worth not starting there."""
+    f = frame_flatness(src, t)
+    if f is None:
+        return False
+    mean, spread = f
+    return spread < 12 or mean < 12 or mean > 243
+
+
+def skip_blank_start(src, start, end, step=0.2, most=1.5):
+    """Nudge the start forward off an empty opening frame, up to `most` seconds.
+    Returns the start to use - unchanged if the picture is fine or nothing better is near."""
+    if end - start < 4 or not blank_frame(src, start):
+        return start
+    t = start
+    while t < start + most and t < end - 3:
+        t += step
+        if not blank_frame(src, t):
+            print(f"  opening frame was blank - starting {t - start:.1f}s later")
+            return t
+    return start
+
+
 def fetch_segment(src, start, end, tmp: Path) -> Path:
     """Get just start..end as an mp4 in tmp."""
     out = tmp / "raw.mp4"
@@ -1544,6 +1585,8 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
     """words given -> reuse transcript; else transcribe the clip if captions wanted."""
     if end <= start:
         die(f"end must be after start ({out.name})")
+    if not is_url(str(src)):
+        start = skip_blank_start(src, start, end)
     print(f"> {out.stem}: {short_ts(start)} -> {short_ts(end)}  ({end - start:.0f}s)")
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -2730,6 +2773,8 @@ def clip_checks(f: Path, c=None):
         out.append(f"Frozen for {scan['freeze']:.0f}s of {dur:.0f}s - a still or title card?")
     if dur and scan.get("black", 0) > max(1.0, dur * 0.3):
         out.append(f"Black screen for {scan['black']:.0f}s of {dur:.0f}s")
+    if blank_frame(f, 0.1):
+        out.append("Opens on a blank frame - TikTok marks this as low quality")
     twin = overlaps_sibling(f, side)
     if twin:
         out.append(f"Nearly the same footage as {twin} - posting both risks a spam flag")
