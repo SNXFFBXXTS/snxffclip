@@ -78,6 +78,22 @@ If even that can't work, it says exactly why in plain words (*"only 9s long – 
 least 15s"*) and moves on to the next video instead of failing the whole batch. Each clip shows which
 rung it came from in Review, e.g. *picked on movement and sound*.
 
+### 🪝 Hook lines on screen
+
+Nearly every clip that does well opens with a **bold line across the top from the first frame** –
+*"FIRST LOOK AT MW4 NUKE ANIMATION ☢️"* – making a promise the footage then pays off. A clip with no
+hook gives a scrolling thumb nothing to stop for.
+
+Put the lines a brief allows in **Hook lines** on the campaign (one per line), and each clip in a batch
+gets a different one, so six posts don't all open with the same sentence. Clipper reads them out of a
+pasted brief automatically where the brief offers a list.
+
+**Emoji come out in colour** 🔥 if the machine has Pillow and an emoji font (`python-pillow` and
+`noto-fonts-emoji` on Arch). Without them the line still renders, just without the emoji – never a row
+of empty boxes.
+
+Only ever use lines the brief allows. Clipper won't invent one.
+
 ### 📱 One cut per platform
 
 Posting the identical file to TikTok, Instagram and YouTube is what platforms read as reposted

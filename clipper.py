@@ -38,6 +38,7 @@ import urllib.request
 from pathlib import Path
 
 W, H = 1080, 1920                      # vertical output size
+HOOK_Y = 210                           # where the hook line sits - same place as the ASS "Top" style
 OUT_DIR = Path.home() / "Clips"
 CACHE = Path.home() / ".cache" / "clipper"
 YTDLP_FMT = "bv*[height<=1080]+ba/b[height<=1080]/b"
@@ -1219,6 +1220,126 @@ def resolve_style(args, video=None, words=None, duration=None):
     return st
 
 
+EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️⃣]")
+
+
+def has_emoji(s):
+    return bool(EMOJI.search(str(s or "")))
+
+
+def strip_emoji(s):
+    return EMOJI.sub("", str(s or "")).replace("  ", " ").strip()
+
+
+def emoji_font_file():
+    """Path to a colour emoji font, if the machine has one."""
+    for q in ("Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "emoji"):
+        try:
+            r = subprocess.run(["fc-match", q, "-f", "%{file}"], capture_output=True, text=True, timeout=10)
+            f = r.stdout.strip()
+            if f and "emoji" in f.lower() and Path(f).is_file():
+                return f
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return ""
+
+
+def hook_png(text, tmp: Path, width=None, style=None):
+    """Draw the hook line as a transparent PNG so the emoji come out in colour.
+    libass renders emoji flat black-and-white, which looks broken next to everyone
+    else's. -> path, or None if this machine can't do it (caller falls back to text)."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont          # optional - not everyone has it
+    except ImportError:
+        return None
+    ef = emoji_font_file()
+    if not ef:
+        return None
+    st = style or {}
+    W_ = int(width or W)
+    size = int(st.get("size") or 64)
+    pad, gap = 40, int(size * 0.12)
+    try:
+        face = None
+        for name in (st.get("font") or "", "DejaVuSans-Bold", "DejaVu Sans"):
+            if not name:
+                continue
+            try:
+                r = subprocess.run(["fc-match", f"{name}:bold", "-f", "%{file}"],
+                                   capture_output=True, text=True, timeout=10)
+                if r.stdout.strip() and Path(r.stdout.strip()).is_file():
+                    face = ImageFont.truetype(r.stdout.strip(), size)
+                    break
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if face is None:
+            return None
+        ef_size = 109 if "NotoColorEmoji" in ef else size      # CBDT bitmaps are a fixed size
+        efont = ImageFont.truetype(ef, ef_size)
+    except (OSError, ValueError):
+        return None
+
+    def runs(s):                                   # split into emoji / not-emoji pieces
+        out, buf, was = [], "", None
+        for ch in s:
+            is_e = bool(EMOJI.match(ch))
+            if was is None or is_e == was:
+                buf += ch
+            else:
+                out.append((buf, was))
+                buf = ch
+            was = is_e
+        if buf:
+            out.append((buf, was))
+        return out
+
+    scale = size / ef_size if ef_size != size else 1.0
+    probe = Image.new("RGBA", (8, 8))
+    pd = ImageDraw.Draw(probe)
+
+    def piece_w(txt, is_e):
+        if not is_e:
+            return pd.textlength(txt, font=face)
+        return pd.textlength(txt, font=efont) * scale + gap
+
+    # wrap into lines that fit
+    lines, cur = [], []
+    for word in str(text).split():
+        trial = cur + [word]
+        w = sum(piece_w(t, e) for t, e in runs(" ".join(trial)))
+        if w > W_ - pad * 2 and cur:
+            lines.append(" ".join(cur))
+            cur = [word]
+        else:
+            cur = trial
+    if cur:
+        lines.append(" ".join(cur))
+    lines = lines[:3]
+    lh = int(size * 1.35)
+    img = Image.new("RGBA", (W_, lh * len(lines) + pad), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(img)
+    for n, line in enumerate(lines):
+        parts = runs(line)
+        total = sum(piece_w(t, e) for t, e in parts)
+        x, y = (W_ - total) / 2, pad / 2 + n * lh
+        for txt, is_e in parts:
+            if is_e:
+                em = Image.new("RGBA", (int(ef_size * (len(txt) + 1) * 1.4), int(ef_size * 1.6)), (0, 0, 0, 0))
+                ImageDraw.Draw(em).text((0, 0), txt, font=efont, embedded_color=True)
+                em = em.crop(em.getbbox() or (0, 0, 1, 1))
+                nh = max(1, int(size * 0.95))                  # sit level with the capitals
+                nw = max(1, round(em.width * nh / max(1, em.height)))
+                img.alpha_composite(em.resize((nw, nh), Image.LANCZOS), (int(x), int(y + size * 0.15)))
+                x += nw + gap
+            else:
+                dr.text((x, y), txt, font=face, fill=(255, 255, 255, 255),
+                        stroke_width=max(2, size // 16), stroke_fill=(0, 0, 0, 235))
+                x += pd.textlength(txt, font=face)
+    out = tmp / "hook.png"
+    img.save(out)
+    return out
+
+
 def build_ass(words, offset, tmp: Path, style=None, overlay=None, duration=0.0):
     """words: [(start,end,text)] in source time; offset = clip start.
     style: dict from resolve_style(). overlay: fixed text at the top for the whole clip."""
@@ -1529,7 +1650,7 @@ def face_track_x(raw: Path):
 
 
 def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, music_start=0.0,
-           logo=None, logo_pos="auto", track=True):
+           logo=None, logo_pos="auto", track=True, hook_img=None):
     if mode == "crop":      # zoom to fill, cut the sides off - following the face if we can see one
         fx = face_track_x(raw) if track else None
         if fx:
@@ -1563,6 +1684,11 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
         v = v[: v.rindex("[v]")] + "[vl]" + v[v.rindex("[v]") + 3:]     # final video -> [vl]
         v += (f";[{li}:v]scale={LOGO_W}:-1,format=rgba[lg];"
               f"[vl][lg]overlay=x={x}:y={y}:shortest=1[v]")
+    hook_img = hook_img if hook_img and Path(hook_img).is_file() else None
+    if hook_img:                                   # the hook line, drawn with colour emoji
+        hi = 1 + (1 if music else 0) + (1 if logo and Path(logo).is_file() else 0)
+        v = v[: v.rindex("[v]")] + "[vh]" + v[v.rindex("[v]") + 3:]
+        v += f";[{hi}:v]format=rgba[hk];[vh][hk]overlay=x=0:y={HOOK_Y}:shortest=1[v]"
     if music:
         inputs += ["-stream_loop", "-1", "-ss", f"{music_start:.2f}", "-i", str(music)]
         # music bed: fade in/out, then duck it whenever someone speaks
@@ -1575,6 +1701,8 @@ def render(raw: Path, out: Path, mode: str, subs, music=None, music_vol=0.15, mu
         amap = "[a]"
     if logo and Path(logo).is_file():
         inputs += ["-loop", "1", "-i", str(logo)]
+    if hook_img:
+        inputs += ["-loop", "1", "-i", str(hook_img)]
     ff(["ffmpeg", "-loglevel", "error", "-stats", "-y", *inputs,
          "-filter_complex", v, "-map", "[v]", "-map", amap,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -1619,11 +1747,15 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
                 if a is not None and not FILLER_WORD.match(str(w[2]).strip()):
                     cap_words.append((start + a, start + (b if b is not None else a + 0.2), w[2]))
             cap_dur = sum(b - a for a, b in keep)
+        hook = getattr(args, "on_screen", None)
+        hook_img = hook_png(hook, tmp) if has_emoji(hook) else None
+        if has_emoji(hook) and not hook_img:        # no Pillow / no emoji font on this machine
+            hook = strip_emoji(hook)                # plain text beats a row of empty boxes
         need_video = getattr(args, "style", None) == "auto" or getattr(args, "match_colors", False)
         style = getattr(args, "fixed_style", None) or resolve_style(args, raw if need_video else None,
                                                                      win, end - start)
         subs = build_ass(cap_words if args.captions else [], start, tmp, style,
-                         overlay=getattr(args, "on_screen", None), duration=cap_dur)
+                         overlay=(None if hook_img else hook), duration=cap_dur)
         music = pick_music(getattr(args, "music", None))
         if music:
             print(f"  music: {music.name}")
@@ -1634,7 +1766,7 @@ def make_clip(src, start, end, out: Path, args, words=None, meta=None, broll=Non
             render(raw, part, args.mode, subs, music,
                    getattr(args, "music_vol", 0.15), getattr(args, "music_start", 0.0),
                    getattr(args, "logo", None), getattr(args, "logo_pos", "auto"),
-                   getattr(args, "track", True))
+                   getattr(args, "track", True), hook_img)
             os.replace(part, out)
         finally:
             part.unlink(missing_ok=True)
@@ -2287,7 +2419,8 @@ def guess_site(text: str) -> str:
 # ---------- reading a pasted campaign brief ----------
 CAMPAIGN_FIELDS = ["name", "agency", "site", "campaign_url", "platforms", "source_note", "music",
                    "min_len", "len", "mode",
-                   "captions", "keywords", "on_screen", "mention", "required_lines", "disclosure",
+                   "captions", "keywords", "on_screen", "on_screen_options",
+                   "mention", "required_lines", "disclosure",
                    "hashtags", "max_extra_hashtags", "caption_rules", "example_captions",
                    "exact_captions", "checklist", "rate", "manual_checks", "logo", "logo_pos", "mentions"]
 
@@ -2310,6 +2443,15 @@ def brief_platform_tags(raw):
         if plat and plat not in found:
             found[plat] = m[2].rstrip(".")
     return found if len(set(v.lower() for v in found.values())) > 1 else {}
+
+
+def hook_for(camp, n=0):
+    """The hook line for clip number n. Campaigns can give a list of approved lines - each clip
+    in a batch gets a different one, so six posts don't all open with the same sentence."""
+    opts = [x for x in ((camp or {}).get("on_screen_options") or []) if x]
+    if opts:
+        return opts[n % len(opts)]
+    return (camp or {}).get("on_screen") or ""
 
 
 def caption_for(caption, camp, platform):
@@ -2418,6 +2560,22 @@ def parse_brief(text):
         c["on_screen"] = req[0]
     else:
         c["on_screen"] = ""
+
+    # a brief that offers approved on-screen lines: keep them all, one per clip (see hook_for)
+    c["on_screen_options"] = []
+    m = re.search(r"on-?screen text[^\n]*\n(.{0,2500}?)"
+                  r"(?:\n[^\n]*\b(?:editing guideline|requirement|not allowed|post spec|performance|"
+                  r"caption guideline|engagement fraud|post violation)\b|\Z)", raw, re.I | re.S)
+    if m:
+        opts = [q.strip() for q in re.findall(r"[\"“]([^\"”\n]{8,110})[\"”]", m[1])
+                if not re.search(r"[@#]", q)]       # that's a caption, not an on-screen line
+        seen = []
+        for o in opts:                              # drop near-repeats, keep the order given
+            if o and not any(o.lower() == s.lower() for s in seen):
+                seen.append(o)
+        c["on_screen_options"] = seen[:12]
+        if seen and not c["on_screen"]:
+            c["on_screen"] = seen[0]
 
     # keywords
     kws = []
@@ -2572,6 +2730,8 @@ def clean_campaign(d):
     out["captions"] = d.get("captions", True) is not False
     out["keywords"] = lst(d.get("keywords"), 40, 10)
     out["on_screen"] = s_(d.get("on_screen"), 120)
+    out["on_screen_options"] = [s_(x, 120) for x in (d.get("on_screen_options") or [])
+                                if s_(x, 120)][:12]
     m = s_(d.get("mention"), 40)
     out["mention"] = ("@" + m.lstrip("@")) if m else ""
     out["required_lines"] = lst(d.get("required_lines"), 120, 5)
@@ -3565,7 +3725,8 @@ def bulk_mode(args):
     if args.dry_run:
         return
     print("\n=== rendering ===")
-    for cd in picks:
+    for n, cd in enumerate(picks):
+        args.on_screen = hook_for(getattr(args, "campaign_data", None), n)
         make_clip(cd["src"], cd["start"], cd["end"], out / f"{cd['name']}.mp4", args, words_of[cd["src"]],
                   clip_meta(cd), broll=cd.get("broll"))
     if getattr(args, "bulk_montage", False):
@@ -4263,6 +4424,8 @@ html[data-theme=snxff] .warn,html[data-theme=snxff] .gwarn{color:var(--gold)}
    <label class="wide">Extra hashtags (comma separated, max 3)<input type="text" id="cf_hashtags"></label>
    <label class="wide">Lines every caption must include (one per line)<textarea id="cf_required_lines" rows="2"></textarea></label>
    <label class="chk wide"><input type="checkbox" id="cf_exact"> Captions must be copied <b>word for word</b> from the list below (nothing added)</label>
+   <label class="wide">Hook lines burned on screen – one per line, a different one per clip. Emoji welcome 🔥
+     <textarea id="cf_on_screen_options" rows="4" placeholder="Only lines the brief allows"></textarea></label>
    <label class="wide">Example / approved captions (one per line)<textarea id="cf_example_captions" rows="4"></textarea></label>
    <label class="wide">Caption style for the AI<textarea id="cf_caption_rules" rows="2"></textarea></label>
    <label class="wide">Things to check by eye in Review (one per line)<textarea id="cf_manual_checks" rows="3"
@@ -4646,7 +4809,7 @@ $('#aitest').onclick=async()=>{await aiSave();$('#aimsg').textContent='Testing�
 
 /* ---------- campaign builder ---------- */
 let cdEditId='';
-const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','checklist','manual_checks'],
+const LISTF=['keywords','hashtags'], LINEF=['required_lines','example_captions','on_screen_options','checklist','manual_checks'],
       TXTF=['name','agency','site','campaign_url','source_note','min_len','len','mention','disclosure','on_screen','caption_rules','rate','logo'];
 const STOP=new Set('the and for with from this that clip clips clipping campaign official new video videos interview launch your'.split(' '));
 async function cdFiles(){

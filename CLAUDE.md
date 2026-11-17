@@ -28,6 +28,10 @@ asked for each step:
    - `captions` – burn in word captions (true unless the brief says otherwise)
    - `on_screen` – text burned at the top of every clip. Only use it for things the brief wants on
      screen (e.g. a required "free trial" line, or a phrase that must appear on-screen). **Never a hashtag.**
+   - `on_screen_options` – a list of hook lines the brief allows; each clip in a batch gets a different
+     one (`hook_for()`). **Always fill this when the brief offers approved on-screen lines** – a clip
+     with no hook reads as low effort and gets scrolled past. Add a fitting emoji to each line (they
+     render in colour). Never invent a line the brief doesn't allow.
    - `keywords` – words clips should mention (product / topic); clips that say them rank higher
    - `mention` (`@account` to tag), `disclosure` (`#Ad` etc.), `required_lines` (lines every caption needs),
      `hashtags` (max 3 extra, only if allowed)
@@ -73,6 +77,10 @@ identical file everywhere is what platforms read as reposted content. Each cut's
 through `caption_for()` so it carries that platform's required @tag. These cuts overlap on purpose, so
 `overlaps_sibling()` skips them and the approved-caption check accepts the per-platform tag swap.
 
+`hook_png()` draws the hook line as a transparent PNG (Pillow, optional) so emoji come out in colour –
+libass renders them flat black-and-white. `render(..., hook_img=)` overlays it at `HOOK_Y`. Without
+Pillow or an emoji font it returns None and the line falls back to ASS text with the emoji stripped.
+
 `skip_blank_start()` nudges a clip's start off an empty opening frame (`blank_frame()` – near black,
 near white or flat colour). TikTok restricted one of the user's posts over exactly this.
 
@@ -102,7 +110,8 @@ cached ffmpeg pass per clip. **Add new safety nets there**, not in the render pa
 
 ## Working on the code
 
-- Keep it one file, standard library + ffmpeg/yt-dlp/faster-whisper/numpy only.
+- Keep it one file, standard library + ffmpeg/yt-dlp/faster-whisper/numpy only. Pillow and OpenCV are
+  optional extras – import them inside the function that needs them and degrade gracefully without.
 - Test changes for real (make small test videos with ffmpeg `testsrc`/`sine`), and load the web page to
   check it still works before committing.
 - Commit with a clear message and push to `origin main` when a change works.
