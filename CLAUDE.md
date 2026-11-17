@@ -51,6 +51,27 @@ asked for each step:
    transcripts are cached, so re-runs are quick. The user can also press the buttons in the web page.
 6. Tell the user the clips are ready and to use **🎬 Review** on the web page (http://localhost:8765).
 
+## How a video turns into clips
+
+`find_moments()` works down a ladder and stops at the first rung that finds something. Each candidate
+carries `c["pick"]` saying which rung it came from; that reaches the clip's `.clip.json` as `meta.pick`
+and shows in Review via `clip_pick()`.
+
+1. `clear_speech()` – transcribe, drop shaky "speech" (music/lyrics)
+2. `any_language()` – the page only offers `.en` whisper models, which are deaf to anything else, so
+   if one hears almost nothing, re-listen with the same model's any-language version and keep whichever
+   heard more. Also retried when there's speech but no window long enough to cut.
+3. `visual_moments()` – movement, scene cuts and loudness
+4. `whole_video_moment()` – footage too short to cut, but still clears the campaign's `min_len`
+
+If none work, `die(too_short_why(...))` says exactly why in plain words; `bulk_mode` catches it, prints
+`! skipped <file>` and carries on with the next video.
+
+`clip_checks()` holds the safety nets that flag clips with ⚠ in Review – near-silent, frozen, black,
+near-duplicate of a sibling clip (`overlaps_sibling()`), ends mid-word, under the campaign minimum,
+low-res source, caption missing a required tag. `clip_scan()` gets loudness/freeze/black from one
+cached ffmpeg pass per clip. **Add new safety nets there**, not in the render path.
+
 ## Running it
 
 - Web page: `./clipper.py --ui` (port 8765). Usually started with

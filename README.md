@@ -64,6 +64,30 @@ again. ⟳ Update in the page works the same as on Linux. NVIDIA card: ⚙️ AI
 
 ## How clips are picked
 
+Clipper works down a ladder and stops at the first rung that finds something, so a video is never
+thrown away just because nobody's talking in it:
+
+| | Rung | Used for |
+| --- | --- | --- |
+| 1 | **Speech** – what's said | podcasts, interviews, streams |
+| 2 | **Any language** – listen again if an English-only model heard nothing | foreign-language trailers (SEGA's are Japanese; there are Arabic and French campaigns too) |
+| 3 | **Visual** – movement, scene cuts and sound | trailers, gameplay, music videos |
+| 4 | **Whole video** – too short to cut, but still long enough to post | short assets |
+
+If even that can't work, it says exactly why in plain words (*"only 9s long – this campaign needs at
+least 15s"*) and moves on to the next video instead of failing the whole batch. Each clip shows which
+rung it came from in Review, e.g. *picked on movement and sound*.
+
+### Safety nets
+
+So you don't have to watch everything, clipper checks every clip it makes and flags the dodgy ones with
+⚠ in Review – **almost silent**, **frozen** (a still or title card), **black screen**, **nearly the same
+footage as another clip** (two near-identical posts is what gets an account flagged for unoriginal
+content), **ends mid-word**, under the campaign's minimum length, low-res source, and captions missing a
+required tag or disclosure. Batches show *"⚠ 3 need a look"* so you only review the flagged ones.
+
+### Scoring
+
 Every possible clip gets a score from: a hook in the first line, loud/excited moments, punchy words,
 **laughter and crowd reactions** (loud sound that isn't speech, bursting on and off like "ha-ha-ha" –
 steady music doesn't count), **funny lines** ("I swear", "plot twist", "are you serious"…), **strong

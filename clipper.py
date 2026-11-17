@@ -2603,6 +2603,83 @@ def _probe(path: Path):
     return _PROBE[key]
 
 
+_SCAN = {}
+
+
+def clip_scan(f: Path):
+    """One ffmpeg pass over a finished clip -> how loud it is, and how much of it is
+    frozen or black. Cached by file + mtime, because Review asks for every clip."""
+    try:
+        st = f.stat()
+    except OSError:
+        return {}
+    key = (str(f), st.st_mtime, st.st_size)
+    if key in _SCAN:
+        return _SCAN[key]
+    out = {}
+    try:
+        r = subprocess.run(["ffmpeg", "-nostats", "-i", str(f), "-af", "volumedetect",
+                            "-vf", "blackdetect=d=0.8:pix_th=0.10,freezedetect=n=-55dB:d=2",
+                            "-f", "null", "-"], capture_output=True, text=True, timeout=120)
+        log = r.stderr
+        m = re.search(r"max_volume:\s*(-?[\d.]+) dB", log)
+        if m:
+            out["max_db"] = float(m[1])
+        m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", log)
+        if m:
+            out["mean_db"] = float(m[1])
+        out["black"] = sum(float(x) for x in re.findall(r"black_duration:\s*([\d.]+)", log))
+        # a freeze (or black) that never ends prints only its start - it runs to the end of the clip
+        total = to_seconds(m[1]) if (m := re.search(r"Duration:\s*(\d+:\d+:[\d.]+)", log)) else 0.0
+        for tag in ("freeze", "black"):
+            starts = [float(x) for x in re.findall(rf"{tag}_start:\s*([\d.]+)", log)]
+            ends = re.findall(rf"{tag}_(?:duration|end):\s*[\d.]+", log)
+            out.setdefault(tag, 0.0)
+            if len(starts) > len(ends) and total:
+                out[tag] += max(0.0, total - starts[-1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _SCAN[key] = out
+    return out
+
+
+def overlaps_sibling(f: Path, side: dict):
+    """Is this clip (nearly) the same stretch of footage as another clip beside it?
+    Two near-identical posts is what gets an account flagged for unoriginal content."""
+    src, a, b = side.get("source"), side.get("start"), side.get("end")
+    if not src or a is None or b is None:
+        return ""
+    for g in sorted(f.parent.glob("*.clip.json")):
+        if g.name == f.with_suffix(".clip.json").name:
+            continue
+        try:
+            o = json.loads(g.read_text())
+        except (OSError, ValueError):
+            continue
+        if o.get("source") != src or o.get("start") is None:
+            continue
+        shared = min(b, o["end"]) - max(a, o["start"])
+        if shared > 0 and shared / max(0.1, min(b - a, o["end"] - o["start"])) >= 0.5:
+            return g.name[:-len(".clip.json")]
+    return ""
+
+
+PICK_SAID = {"speech": "picked on what's said",
+             "speech (any language)": "picked on what's said (not English)",
+             "visual": "picked on movement and sound",
+             "whole video": "the whole video - too short to cut"}
+
+
+def clip_pick(f: Path):
+    """Which rung of the picking ladder this clip came from, in plain words."""
+    try:
+        side = json.loads(f.with_suffix(".clip.json").read_text())
+    except (OSError, ValueError):
+        return ""
+    meta = side.get("meta") or {}
+    return PICK_SAID.get(meta.get("pick") or ("visual" if meta.get("visual") else ""), "")
+
+
 def clip_checks(f: Path, c=None):
     """Problems worth a look before posting this clip."""
     out = []
@@ -2644,13 +2721,30 @@ def clip_checks(f: Path, c=None):
         short = _probe(Path(src))[2]
         if short and short < 720:
             out.append(f"Low-res source ({short}p) - may look blurry")
+
+    # --- safety nets: catch a bad clip here so you don't have to watch all of them ---
+    scan = clip_scan(f)
+    if audio and scan.get("max_db") is not None and scan["max_db"] < -35:
+        out.append("Almost silent - check the sound")
+    if dur and scan.get("freeze", 0) > max(2.0, dur * 0.5):
+        out.append(f"Frozen for {scan['freeze']:.0f}s of {dur:.0f}s - a still or title card?")
+    if dur and scan.get("black", 0) > max(1.0, dur * 0.3):
+        out.append(f"Black screen for {scan['black']:.0f}s of {dur:.0f}s")
+    twin = overlaps_sibling(f, side)
+    if twin:
+        out.append(f"Nearly the same footage as {twin} - posting both risks a spam flag")
+    words = side.get("words") or []
+    if words and side.get("end") is not None and not side.get("meta", {}).get("visual"):
+        if float(words[-1][1]) > float(side["end"]) - 0.05:
+            out.append("Ends mid-word")
     return out
 
 
 def clip_meta(c):
     return {"score": round(float(c.get("score", 0)), 3), "visual": bool(c.get("visual")),
             "kw": int(c.get("keyword_hits", 0)), "len": round(c["end"] - c["start"], 1),
-            "mix": bool(c.get("mix")), "tags": c.get("tags", [])}
+            "mix": bool(c.get("mix")), "tags": c.get("tags", []),
+            "pick": c.get("pick", ""), "whole": bool(c.get("whole"))}
 
 
 def rate_clip(f: Path, c=None, checks=None, learn=None, rank=None):
@@ -2998,21 +3092,58 @@ def any_language(src, args, segs):
     return segs
 
 
+def whole_video_moment(src, camp=None):
+    """Last rung of the ladder: the footage is shorter than the clip length we're after.
+    Use all of it rather than throwing it away, as long as it still clears the campaign's
+    own minimum length. -> [] if even that can't work."""
+    dur = duration_of(src)
+    mn = float((camp or {}).get("min_len") or 0)
+    if dur < max(mn, 3.0):
+        return []
+    return [{"i": 0, "j": 0, "start": 0.0, "end": dur, "text": "", "visual": True,
+             "whole": True, "pick": "whole video", "score": 0.5}]
+
+
+def too_short_why(src, lo, camp=None):
+    """Plain words for why a video can't be used at all - never just 'nothing usable'."""
+    dur = duration_of(src)
+    mn = float((camp or {}).get("min_len") or 0)
+    if dur < 3.0:
+        return f"only {dur:.0f}s long - too short to clip"
+    if mn and dur < mn:
+        return f"only {dur:.0f}s long - this campaign needs at least {mn:g}s"
+    return f"only {dur:.0f}s long - shorter than the {lo:g}s clips we're cutting"
+
+
 def find_moments(src, args, lo, hi, target):
     """Transcribe (cached), then score every possible clip in one video.
-    Videos with (almost) no speech fall back to picking by movement and sound."""
+
+    The ladder, in order, stopping at the first rung that finds something:
+      1. speech          - what's said (podcasts, interviews, streams)
+      2. any language    - re-listen if an English-only model heard nothing
+      3. visual          - movement, scene cuts and sound (trailers, gameplay, music)
+      4. whole video     - footage too short to cut, but still long enough to post
+    Each candidate carries c["pick"] saying which rung it came from."""
+    camp = getattr(args, "campaign_data", None)
     segs, dropped = clear_speech(src, args.model)
     if dropped:
         print(f"  ignored {dropped} unclear bit(s) of 'speech' (music/lyrics)")
     words = sum(len(s["text"].split()) for s in segs)
+    heard = "speech"
     if words < 12:
+        was = args.model
         segs = any_language(src, args, segs)
         words = sum(len(s["text"].split()) for s in segs)
+        if args.model != was:
+            heard = "speech (any language)"
     if words < 12:
-        cands = visual_moments(src, lo, hi, target)
+        cands = visual_moments(src, lo, hi, target) or whole_video_moment(src, camp)
         if not cands:
-            die("video too short to use")
-        print(f"  no real speech - picking by movement and sound ({len(cands)} options)")
+            die(too_short_why(src, lo, camp))
+        for c in cands:
+            c.setdefault("pick", "visual")
+        print(f"  too short to cut - using the whole {cands[0]['end']:.0f}s" if cands[0].get("whole")
+              else f"  no real speech - picking by movement and sound ({len(cands)} options)")
         if getattr(args, "chat", True):
             add_chat_bonus(src, cands)
         learn = load_learning()
@@ -3026,16 +3157,24 @@ def find_moments(src, args, lo, hi, target):
         segs = split_sentences(segs)               # answers and questions become separate pieces
     cands = build_candidates(segs, lo, hi, target, qa=getattr(args, "qa", True))
     if not cands:                                  # scattered half-heard lines with music between
-        alt = any_language(src, args, segs)        # them give no window long enough to use
+        was = args.model                           # them give no window long enough to use
+        alt = any_language(src, args, segs)
         if alt is not segs:
             segs = split_sentences(alt) if getattr(args, "qa", True) else alt
             cands = build_candidates(segs, lo, hi, target, qa=getattr(args, "qa", True))
+            if cands and args.model != was:
+                heard = "speech (any language)"
     if not cands:                                  # nothing to hear: pick on what's on screen
-        cands = visual_moments(src, lo, hi, target)
+        cands = visual_moments(src, lo, hi, target) or whole_video_moment(src, camp)
         if not cands:
-            die(f"no {args.len}s windows found - try a different clip length")
-        print(f"  not enough speech to cut on - picking by movement and sound ({len(cands)} options)")
+            die(too_short_why(src, lo, camp))
+        for c in cands:
+            c.setdefault("pick", "visual")
+        print(f"  too short to cut - using the whole {cands[0]['end']:.0f}s" if cands[0].get("whole")
+              else f"  not enough speech to cut on - picking by movement and sound ({len(cands)} options)")
         return segs, cands
+    for c in cands:
+        c["pick"] = heard
     try:
         if not getattr(args, "laughs", True):
             raise RuntimeError("turned off")
@@ -3213,8 +3352,8 @@ def bulk_mode(args):
         print(f"\n=== scan {i}/{len(vids)}: {v.name} ===")
         try:
             segs, cands = find_moments(v, args, lo, hi, target)
-        except SystemExit:
-            print(f"  ! nothing usable in {v.name}")
+        except SystemExit:                            # the reason was printed just above
+            print(f"  ! skipped {v.name}")
             continue
         if cands and cands[0].get("visual"):
             visual += min(duration_of(v), hi)
@@ -4580,7 +4719,9 @@ function review(gi){
 function rvShow(){
   const c=rvList[rvI]; if(!c)return;
   const v=$('#rvvideo'); v.src=`/clips/${enc(c.path)}?v=${c.v}`; v.play().catch(()=>{});
-  $('#rvcap').innerHTML=`<div style="color:#ffcf3d">${starStr(c.stars)} <b style="color:var(--text)">${(c.stars||0).toFixed(1)}</b> · ${esc(c.why||'')}</div>`+esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
+  $('#rvcap').innerHTML=`<div style="color:#ffcf3d">${starStr(c.stars)} <b style="color:var(--text)">${(c.stars||0).toFixed(1)}</b> · ${esc(c.why||'')}</div>`
+    +(c.pick?`<div style="color:var(--acc2);margin-bottom:2px">${esc(c.pick)}</div>`:'')
+    +esc(c.caption||c.name)+((c.checks||[]).length?'<div style="color:#ffb03d;margin-top:4px">'+c.checks.map(w=>'⚠ '+esc(w)).join('<br>')+'</div>':'');
   const kept=Object.values(rvMark).filter(x=>x==='keep').length, dropped=Object.values(rvMark).filter(x=>x==='drop').length;
   $('#rvpos').textContent=`Clip ${rvI+1} of ${rvList.length} · ⭐ ${kept} kept · ✕ ${dropped} dropped`;
   const man=c.manual||[]; $('#rvman').style.display=man.length?'':'none';
@@ -5419,6 +5560,7 @@ def serve_ui(args):
                      "v": int(f.stat().st_mtime),
                      "styled": f.with_suffix(".clip.json").is_file() and not f.stem.startswith("montage-"),
                      "checks": clip_checks(f, camp), "_f": f, "_camp": camp,
+                     "pick": clip_pick(f),
                      "manual": camp.get("manual_checks") or [],
                      "posted": posted_count.get(f"{key}/{rel.as_posix()}", []),
                      "posts": post_info.get(f"{key}/{rel.as_posix()}", []),
